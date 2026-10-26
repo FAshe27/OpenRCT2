@@ -221,24 +221,37 @@ namespace OpenRCT2::PathFinding
             // What we want instead is to apply that randomness in the direction they are walking ONLY, and keep their
             // other coordinate constant.
             //
-            // However, we have also seen some situations where guests end up too far from the centre of paths. We've
-            // not identified exactly what causes this yet, but to limit the impact of it, we don't just keep the other
-            // coordinate constant, but instead clamp it to an acceptable range. This brings in 'outlier' guests from
-            // the edges of the path, while allowing guests who are already in an acceptable position to stay there.
+            // Guest-spread change (personal fork, based on v0.5.6): the stock game clamps the
+            // sideways coordinate to the centre line +/- 3, which funnels every peep through a
+            // 7-unit band in the middle of a 32-unit tile - the classic conga line. Instead, give
+            // each peep their own "lane" across the width of the path: a sideways offset of
+            // -10..+10, derived deterministically from their peepId (a Knuth multiplicative
+            // hash, so consecutive guests land in unrelated lanes). Because the lane never
+            // changes, a peep walks a straight line parallel to the centre line - no weaving -
+            // and corners still vary naturally, as the lane axis swaps at a turn. Deriving it
+            // from peepId means no save-game field and no extra ScenarioRand() calls, so
+            // saved games and multiplayer stay deterministic. Queues are untouched: this whole
+            // block is skipped while queuing, so queue lines stay single file as they must.
+            // To change the spread, change kGuestSpreadLaneMax (10 = feet land 6..26 of 32).
 
             const int8_t offset = (ScenarioRand() & 7) - 3;
+            constexpr int32_t kGuestSpreadLaneMax = 10;
+            const uint32_t laneHash = peep.peepId * 2654435761u;
+            const uint32_t laneSpan = static_cast<uint32_t>(2 * kGuestSpreadLaneMax + 1);
+            const int32_t lane = static_cast<int32_t>((laneHash ^ (laneHash >> 16)) % laneSpan) - kGuestSpreadLaneMax;
             if (direction == 0 || direction == 2)
             {
-                // Peep is moving along X, so apply the offset to the X position of the destination and clamp their current Y
-                const int32_t centreLine = (peep.y & 0xFFE0) + kCoordsXYHalfTile;
+                // Peep is moving along X, so apply the offset to the X position of the
+                // destination and the peep's lane to its Y position (newTile is already
+                // the centre of the destination tile).
                 newTile.x += offset;
-                newTile.y = std::clamp<int32_t>(peep.y, centreLine - 3, centreLine + 3);
+                newTile.y += lane;
             }
             else
             {
-                // Peep is moving along Y, so apply the offset to the Y position of the destination and clamp their current X
-                const int32_t centreLine = (peep.x & 0xFFE0) + kCoordsXYHalfTile;
-                newTile.x = std::clamp<int32_t>(peep.x, centreLine - 3, centreLine + 3);
+                // Peep is moving along Y, so apply the offset to the Y position of the
+                // destination and the peep's lane to its X position.
+                newTile.x += lane;
                 newTile.y += offset;
             }
         }
