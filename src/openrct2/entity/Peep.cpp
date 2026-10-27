@@ -789,8 +789,21 @@ namespace OpenRCT2
             // even moving - a guest parked at the full gap behind a stopped
             // leader is held up in the only sense that matters, even in a
             // single rank with an empty corridor behind it.
+            // Handoff fix (personal fork, DIAGNOSIS item 5): the stopped
+            // term is 6, not 3, so a stopped leader ALWAYS meets the
+            // maximum patience roll (4). The old 3 could fall short in
+            // exactly the permanent-park corner: this block is only
+            // entered when the gap clamp bites, which bounds
+            // nearestForward to at most effectiveGap + nominalAdvance - 1
+            // (<= 5 + 3 - 1 = 7 for a lone leader), so the gap term can
+            // be as low as -2 with the corridor and pressure terms at 0 -
+            // a patience-4 follower behind a lone stopped leader then
+            // peaked at heldUp 1 and never squeezed. With 6 the same
+            // worst case reaches 4, and every less extreme geometry is
+            // correspondingly surer; en-route leaders keep the 0 term,
+            // so ordinary flow is unchanged.
             const int32_t heldUp = (kGuestFollowMinGap - nearestForward) + (corridorCount - 1)
-                + std::min(behindPressure + shoulderPressure, 2) + (nearestEnRoute ? 0 : 3);
+                + std::min(behindPressure + shoulderPressure, 2) + (nearestEnRoute ? 0 : 6);
             // A free slot beside the blocker only counts as "passing is
             // handling it" when the lane choice would actually use it: the
             // leader must be moving AND slower than the follower. A stopped

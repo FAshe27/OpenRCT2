@@ -15,6 +15,7 @@
 #include "../../management/Finance.h"
 #include "../../object/BannerSceneryEntry.h"
 #include "../../object/ObjectEntryManager.h"
+#include "../../peep/PlazaRegions.h"
 #include "../../world/Banner.h"
 #include "../../world/Footpath.h"
 #include "../../world/Map.h"
@@ -155,6 +156,8 @@ namespace OpenRCT2::GameActions
         bannerElement->setGhost(GetFlags().has(CommandFlag::ghost));
 
         MapInvalidateTileFull(_loc);
+        // Banners clear path edges, which feed plaza door extraction.
+        Plaza::InvalidatePlazaRegions();
         MapAnimations::MarkTileForInvalidation(TileCoordsXY(_loc));
 
         res.cost = bannerEntry->price;

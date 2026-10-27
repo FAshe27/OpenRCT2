@@ -31,6 +31,71 @@ namespace OpenRCT2::Plaza
         PlazaGrid::LateralRuns _lateralRuns; // per-tile axis runs over _regionByTile (lateral spread)
         std::vector<Region> _regions;        // index = id - 1
 
+        // Handoff-fix steering watch (see the header): one entry per
+        // peep id steering is currently interested in. Entries are
+        // created lazily by the Note* calls and dropped wholesale by
+        // InvalidatePlazaRegions() alongside the cache itself; the
+        // per-entry tick windows bound whatever survives.
+        struct SteerWatchEntry
+        {
+            uint32_t peepId{};
+            // Progress-watchdog window.
+            uint16_t regionId{};
+            TileCoordsXYZ goal{};
+            TileCoordsXY anchor{};
+            int32_t anchorGoalDistance{};
+            uint32_t windowStartTick{};
+            uint32_t decisions{};
+            uint32_t cooldownUntilTick{};
+            // Re-capture guard exit mark.
+            uint16_t exitRegionId{};
+            TileCoordsXYZ exitGoal{};
+            TileCoordsXY exitLanding{};
+            uint32_t exitTick{};
+            bool exitPending{};
+            bool exitObserved{};
+        };
+        std::vector<SteerWatchEntry> _steerWatch;
+        constexpr size_t kSteerWatchMaxEntries = 1024;
+
+        int32_t TileManhattan(const TileCoordsXY& a, const TileCoordsXY& b)
+        {
+            return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+        }
+
+        SteerWatchEntry* FindSteerWatchEntry(uint32_t peepId)
+        {
+            for (auto& entry : _steerWatch)
+            {
+                if (entry.peepId == peepId)
+                    return &entry;
+            }
+            return nullptr;
+        }
+
+        SteerWatchEntry& GetOrCreateSteerWatchEntry(uint32_t peepId, uint32_t tick)
+        {
+            if (auto* entry = FindSteerWatchEntry(peepId))
+                return *entry;
+            if (_steerWatch.size() >= kSteerWatchMaxEntries)
+            {
+                // Evict the entry whose watchdog window is oldest - the
+                // one steering has used least recently. Bounded and
+                // deterministic (window ticks are game state).
+                size_t oldest = 0;
+                for (size_t i = 1; i < _steerWatch.size(); i++)
+                {
+                    if (_steerWatch[i].windowStartTick < _steerWatch[oldest].windowStartTick)
+                        oldest = i;
+                }
+                _steerWatch.erase(_steerWatch.begin() + static_cast<std::ptrdiff_t>(oldest));
+            }
+            _steerWatch.push_back({});
+            _steerWatch.back().peepId = peepId;
+            _steerWatch.back().windowStartTick = tick;
+            return _steerWatch.back();
+        }
+
         // Mirrors of the file-static helpers in GuestPathfinding.cpp
         // (GetBannerOnPath / BannerClearPathEdges / PathGetPermittedEdges).
         // They are duplicated here because the originals are translation-
@@ -284,6 +349,95 @@ namespace OpenRCT2::Plaza
     void InvalidatePlazaRegions()
     {
         _dirty = true;
+        // The steering watch is derived from the same geometry as the
+        // cache (doors, landings, regions); a geometry change voids its
+        // marks and windows too. Park load reaches here via Game.cpp.
+        _steerWatch.clear();
+    }
+
+    void NotePlazaSteerExit(uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& goal, const TileCoordsXY& landing)
+    {
+        auto& entry = GetOrCreateSteerWatchEntry(peepId, 0);
+        entry.exitRegionId = regionId;
+        entry.exitGoal = goal;
+        entry.exitLanding = landing;
+        entry.exitTick = 0;
+        entry.exitPending = true;
+        entry.exitObserved = false;
+    }
+
+    void ObservePlazaSteerGuest(uint32_t peepId, uint16_t currentRegionId, uint32_t tick)
+    {
+        auto* entry = FindSteerWatchEntry(peepId);
+        if (entry == nullptr || !entry->exitPending)
+            return;
+        if (currentRegionId != entry->exitRegionId)
+        {
+            entry->exitPending = false;
+            entry->exitObserved = true;
+            entry->exitTick = tick;
+        }
+    }
+
+    bool PlazaSteerGuardDeclines(
+        uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& current, const TileCoordsXYZ& goal, uint32_t tick)
+    {
+        auto* entry = FindSteerWatchEntry(peepId);
+        if (entry == nullptr || entry->exitRegionId == 0 || !entry->exitObserved)
+            return false;
+        if (entry->exitRegionId != regionId)
+            return false; // a different region is a fresh capture, always honoured
+        const bool goalChanged = entry->exitGoal.x != goal.x || entry->exitGoal.y != goal.y || entry->exitGoal.z != goal.z;
+        const bool windowLapsed = (tick - entry->exitTick) > kPlazaSteerGuardWindowTicks;
+        const bool leftArea = TileManhattan({ current.x, current.y }, entry->exitLanding) > kPlazaSteerGuardRadiusTiles;
+        if (goalChanged || windowLapsed || leftArea)
+        {
+            entry->exitRegionId = 0;
+            entry->exitObserved = false;
+            return false;
+        }
+        return true;
+    }
+
+    bool PlazaSteerCoolingDown(uint32_t peepId, uint32_t tick)
+    {
+        const auto* entry = FindSteerWatchEntry(peepId);
+        if (entry == nullptr)
+            return false;
+        return static_cast<int32_t>(entry->cooldownUntilTick - tick) > 0;
+    }
+
+    bool NotePlazaSteerDecision(
+        uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& current, const TileCoordsXYZ& goal, uint32_t tick)
+    {
+        auto& entry = GetOrCreateSteerWatchEntry(peepId, tick);
+        const bool newWindow = entry.regionId != regionId || entry.goal.x != goal.x || entry.goal.y != goal.y
+            || entry.goal.z != goal.z || (tick - entry.windowStartTick) > kPlazaWatchWindowTicks;
+        if (newWindow)
+        {
+            entry.regionId = regionId;
+            entry.goal = goal;
+            entry.anchor = { current.x, current.y };
+            entry.anchorGoalDistance = TileManhattan({ current.x, current.y }, { goal.x, goal.y });
+            entry.windowStartTick = tick;
+            entry.decisions = 0;
+        }
+        entry.decisions++;
+        if (entry.decisions < kPlazaWatchMinDecisions)
+            return false;
+        const int32_t netTiles = TileManhattan({ current.x, current.y }, entry.anchor);
+        const int32_t goalDistance = TileManhattan({ current.x, current.y }, { goal.x, goal.y });
+        if (netTiles > kPlazaWatchMaxNetTiles || goalDistance < entry.anchorGoalDistance - kPlazaWatchGoalSlackTiles)
+            return false;
+        // The watchdog fires: suppress steering for the cooldown and
+        // restart the window here, so post-cooldown tracking starts from
+        // the position the fresh stock plan has to work with.
+        entry.cooldownUntilTick = tick + kPlazaWatchCooldownTicks;
+        entry.anchor = { current.x, current.y };
+        entry.anchorGoalDistance = goalDistance;
+        entry.windowStartTick = tick;
+        entry.decisions = 0;
+        return true;
     }
 
     bool PlazaRegionsDirty()

@@ -2418,6 +2418,39 @@ namespace OpenRCT2::PathFinding
     }
 
     /**
+     * Handoff fix (personal fork, DIAGNOSIS item 4): the tile a guest
+     * must step FROM to join the queue whose tail tile is `tail`. The
+     * stock queue-join test (Peep tile-entry handler) accepts the join
+     * only when the queue tile's banner direction is the reverse of the
+     * guest's step direction, so the banner direction names the approach
+     * side exactly: the approach tile is the tail's neighbour in the
+     * banner direction. Returns false - leaving the caller to steer at
+     * the tail itself, as before - when the tail is not a bannered queue
+     * tile or the approach tile does not hold a non-queue path element
+     * connected back toward the tail.
+     */
+    static bool GuestGetQueueApproachTile(const TileCoordsXYZ& tail, TileCoordsXYZ& outApproach)
+    {
+        const auto* tailPath = MapGetPathElementAt(tail);
+        if (tailPath == nullptr || !tailPath->isQueue() || !tailPath->hasQueueBanner())
+            return false;
+
+        const Direction bannerDirection = tailPath->getQueueBannerDirection();
+        TileCoordsXYZ approach = tail;
+        approach.x += TileDirectionDelta[bannerDirection].x;
+        approach.y += TileDirectionDelta[bannerDirection].y;
+
+        const auto* approachPath = MapGetPathElementAt(approach);
+        if (approachPath == nullptr || approachPath->isQueue())
+            return false;
+        if (!(approachPath->getEdges() & (1 << DirectionReverse(bannerDirection))))
+            return false;
+
+        outApproach = approach;
+        return true;
+    }
+
+    /**
      * V2 plaza walking (personal fork): scores one door of a plaza region
      * by running the stock heuristic search outward from the door's landing
      * tile toward the goal - the same metric ChooseDirection minimises
@@ -2671,6 +2704,16 @@ namespace OpenRCT2::PathFinding
      * No new peep state, no save fields, and no ScenarioRand draws at
      * all: the aimless door pick documented at the bottom (M3) is a
      * deterministic hash of synced game state, not a draw.
+     *
+     * Handoff fix (personal fork, DIAGNOSIS items 1-4): the steering
+     * watch beside the region cache (PlazaRegions.h) guards the three
+     * handoff points where a steering decision and a stock transition
+     * can disagree - door landings (re-capture guard + progress
+     * watchdog), the park entrance threshold and the queue tail (both
+     * are aimed at their approach tile so stock makes the final,
+     * direction-keyed step). Still no peep state, no save fields and no
+     * ScenarioRand draws: the watch is steering-system state, cleared
+     * with the region cache it sits beside.
      */
     static bool PlazaTrySteer(Guest& peep)
     {
@@ -2679,6 +2722,13 @@ namespace OpenRCT2::PathFinding
 
         const TileCoordsXYZ current{ peep.nextLoc };
         const uint16_t regionId = Plaza::GetRegionIdAt(current);
+
+        // Handoff fix (DIAGNOSIS item 1): feed the steering watch's
+        // delivery observation even when this call finds the peep off
+        // the region - being seen outside the region they were steered
+        // out of is what arms the re-capture guard below.
+        Plaza::ObservePlazaSteerGuest(peep.peepId, regionId, getGameState().currentTicks);
+
         if (regionId == 0)
             return false;
 
@@ -2724,6 +2774,70 @@ namespace OpenRCT2::PathFinding
         else
         {
             aimless = true;
+        }
+
+        // Handoff fix (DIAGNOSIS items 3-4): the tile steering actually
+        // aims at. For two goals the stock transition at the goal tile
+        // keys on the guest's step direction, which a free steering
+        // vector cannot guarantee - so steering aims at the APPROACH
+        // tile instead and stock makes the final step:
+        // - a leaver's park entrance: the tile the entrance faces (the
+        //   guest then crosses onto the entrance tile in the entrance's
+        //   reverse facing direction - the only outward crossing the
+        //   entrance tile-entry handler accepts without a snap-back);
+        // - a ride's queue tail: the tile on the queue banner's side of
+        //   the tail (see GuestGetQueueApproachTile).
+        // When the peep already stands on the approach tile, the
+        // goal-in-region branch below declines (steerGoal == current),
+        // handing the final step to stock. The true goal is kept for
+        // the watch/guard bookkeeping and for excluding the goal tile
+        // itself as a door landing during scoring - a landing on the
+        // entrance or queue tile would recreate the free-vector arrival
+        // this substitution exists to avoid.
+        TileCoordsXYZ steerGoal = goal;
+        if (haveGoal && peep.peepFlags.has(PeepFlag::leavingPark))
+        {
+            const auto* entranceElement = MapGetParkEntranceElementAt(goal.toCoordsXYZ(), false);
+            if (entranceElement != nullptr)
+            {
+                const Direction facing = entranceElement->getDirection();
+                steerGoal = { goal.x + TileDirectionDelta[facing].x, goal.y + TileDirectionDelta[facing].y, goal.z };
+            }
+        }
+        else if (haveGoal && !peep.guestHeadingToRideId.IsNull())
+        {
+            TileCoordsXYZ approach{};
+            if (GuestGetQueueApproachTile(goal, approach))
+                steerGoal = approach;
+        }
+
+        if (haveGoal)
+        {
+            const uint32_t tick = getGameState().currentTicks;
+
+            // Handoff fix (DIAGNOSIS item 2): while the progress
+            // watchdog's cooldown runs, steering stays off this guest
+            // entirely - stock is re-planning them.
+            if (Plaza::PlazaSteerCoolingDown(peep.peepId, tick))
+                return false;
+
+            // Handoff fix (DIAGNOSIS item 2): account this steering
+            // decision. A guest whose decisions buy no net progress is
+            // looping, so burn the plan the way a pickup does in game
+            // (playtest E2) and let stock start over with a reset goal.
+            if (Plaza::NotePlazaSteerDecision(peep.peepId, regionId, current, goal, tick))
+            {
+                peep.resetPathfindGoal();
+                return false;
+            }
+
+            // Handoff fix (DIAGNOSIS item 1): a guest stock just walked
+            // back into the region they were steered out of, heading for
+            // the same outside goal, is in the door handoff loop -
+            // decline, so stock keeps uncontested control of the onward
+            // route from the landing.
+            if (Plaza::PlazaSteerGuardDeclines(peep.peepId, regionId, current, goal, tick))
+                return false;
         }
 
         const CoordsXY anchor = peep.getLocation();
@@ -2800,6 +2914,17 @@ namespace OpenRCT2::PathFinding
             // to stay inside the region; see GuestPlazaPassingOffset.
             GuestPlazaPassingOffset(peep, region, anchor, target, targetIsDoorLanding, destination);
 
+            // Handoff fix (DIAGNOSIS item 1): when this issue delivers a
+            // goal-directed guest onto a door landing (the issued
+            // destination IS the landing tile, not an intermediate
+            // waypoint toward it), record the exit, so the re-capture
+            // guard can protect the guest/region/goal pairing if stock
+            // walks them straight back in.
+            if (targetIsDoorLanding && haveGoal && destinationTile == target)
+            {
+                Plaza::NotePlazaSteerExit(peep.peepId, regionId, goal, { target.x, target.y });
+            }
+
             // Face along the dominant axis of travel, like the walker does.
             const int32_t dx = destination.x - anchor.x;
             const int32_t dy = destination.y - anchor.y;
@@ -2814,25 +2939,25 @@ namespace OpenRCT2::PathFinding
 
         if (haveGoal)
         {
-            // Goal inside this same region: no door, steer at the goal
-            // tile itself (M3 for ride goals fronting the plaza; the
-            // queue-end tile computed by GuestGetRideGoalTile is the usual
-            // case).
-            if (Plaza::GetRegionIdAt(goal) == regionId)
+            // Steer goal inside this same region: no door, steer at it
+            // directly (M3 for ride goals fronting the plaza; with the
+            // items 3-4 approach substitution this is the approach tile
+            // of an entrance or queue tail fronting the plaza).
+            if (Plaza::GetRegionIdAt(steerGoal) == regionId)
             {
-                if (goal == current)
+                if (steerGoal == current)
                     return false; // already there; stock arrival logic owns this
-                return steerTo(goal, false);
+                return steerTo(steerGoal, false);
             }
 
             if (region.doors.empty())
                 return false;
 
-            // A door whose landing IS the goal tile wins outright (the
-            // search never scores its own starting tile).
+            // A door whose landing IS the steer goal tile wins outright
+            // (the search never scores its own starting tile).
             for (const auto& door : region.doors)
             {
-                if (door.landing.x == goal.x && door.landing.y == goal.y && region.baseZ == goal.z)
+                if (door.landing.x == steerGoal.x && door.landing.y == steerGoal.y && region.baseZ == steerGoal.z)
                 {
                     return steerTo({ door.landing.x, door.landing.y, region.baseZ }, true);
                 }
@@ -2845,8 +2970,10 @@ namespace OpenRCT2::PathFinding
             for (const auto& door : region.doors)
                 ordered.push_back(&door);
             std::stable_sort(ordered.begin(), ordered.end(), [&](const PlazaGrid::Door* a, const PlazaGrid::Door* b) {
-                return PlazaGrid::HeuristicScoreTiles({ a->landing.x, a->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z)
-                    < PlazaGrid::HeuristicScoreTiles({ b->landing.x, b->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z);
+                return PlazaGrid::HeuristicScoreTiles(
+                           { a->landing.x, a->landing.y }, { steerGoal.x, steerGoal.y }, region.baseZ, steerGoal.z)
+                    < PlazaGrid::HeuristicScoreTiles(
+                           { b->landing.x, b->landing.y }, { steerGoal.x, steerGoal.y }, region.baseZ, steerGoal.z);
             });
             if (ordered.size() > Plaza::kPlazaMaxScoredDoors)
                 ordered.resize(Plaza::kPlazaMaxScoredDoors);
@@ -2858,9 +2985,15 @@ namespace OpenRCT2::PathFinding
             uint8_t bestSteps = 0xFF;
             for (const auto* door : ordered)
             {
+                // Handoff fix (items 3-4): when an approach tile is being
+                // aimed at, the true goal tile itself is never a scoring
+                // candidate - landing there is the free-vector arrival
+                // the approach substitution exists to avoid.
+                if (steerGoal != goal && door->landing.x == goal.x && door->landing.y == goal.y)
+                    continue;
                 uint16_t score = 0xFFFF;
                 uint8_t steps = 0xFF;
-                if (!PlazaScoreDoor(peep, region, *door, goal, queueRideIndex, perDoorBudget, score, steps))
+                if (!PlazaScoreDoor(peep, region, *door, steerGoal, queueRideIndex, perDoorBudget, score, steps))
                     continue;
                 if (score < bestScore || (score == bestScore && steps < bestSteps))
                 {
@@ -2890,15 +3023,34 @@ namespace OpenRCT2::PathFinding
             if (region.doors.empty())
                 return false;
 
+            // Handoff fix (DIAGNOSIS item 3): the park entrance tile is
+            // a legal door landing, but a wanderer vectored onto it can
+            // only snap back or leave the park - the entrance door is
+            // never an aimless pick (goal-directed leavers above still
+            // use it, via its approach tile).
+            std::vector<const PlazaGrid::Door*> pickable;
+            pickable.reserve(region.doors.size());
+            for (const auto& door : region.doors)
+            {
+                if (MapGetParkEntranceElementAt(
+                        TileCoordsXYZ{ door.landing.x, door.landing.y, region.baseZ }.toCoordsXYZ(), false)
+                    == nullptr)
+                {
+                    pickable.push_back(&door);
+                }
+            }
+            if (pickable.empty())
+                return false;
+
             const PlazaGrid::Door* chosen = nullptr;
             const TileCoordsXYZ remembered{ peep.pathfindGoal };
             if (!remembered.isNull() && remembered.z == region.baseZ)
             {
-                for (const auto& door : region.doors)
+                for (const auto* door : pickable)
                 {
-                    if (door.landing.x == remembered.x && door.landing.y == remembered.y)
+                    if (door->landing.x == remembered.x && door->landing.y == remembered.y)
                     {
-                        chosen = &door;
+                        chosen = door;
                         break;
                     }
                 }
@@ -2918,8 +3070,8 @@ namespace OpenRCT2::PathFinding
                     ^ static_cast<uint32_t>(current.y) * 3266489917u
                     ^ (static_cast<uint32_t>(regionId) + getGameState().currentTicks) * 668265263u;
                 const uint32_t doorMix = doorHash ^ (doorHash >> 16);
-                const uint32_t pick = doorMix % static_cast<uint32_t>(region.doors.size());
-                chosen = &region.doors[pick];
+                const uint32_t pick = doorMix % static_cast<uint32_t>(pickable.size());
+                chosen = pickable[pick];
                 peep.pathfindGoal = { TileCoordsXYZ{ chosen->landing.x, chosen->landing.y, region.baseZ }, 0 };
             }
 

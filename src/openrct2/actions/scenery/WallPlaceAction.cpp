@@ -18,6 +18,7 @@
 #include "../../object/ObjectEntryManager.h"
 #include "../../object/SmallSceneryEntry.h"
 #include "../../object/WallSceneryEntry.h"
+#include "../../peep/PlazaRegions.h"
 #include "../../ride/RideData.h"
 #include "../../ride/TrackData.h"
 #include "../../ride/TrackDesign.h"
@@ -388,6 +389,8 @@ namespace OpenRCT2::GameActions
         const auto bannerId = banner != nullptr ? banner->id : BannerIndex::GetNull();
         res.setData(WallPlaceActionResult{ wallElement->getBaseZ(), bannerId });
 
+        // Walls/fences on path edges feed plaza door legality.
+        Plaza::InvalidatePlazaRegions();
         return res;
     }
 

@@ -121,4 +121,73 @@ namespace OpenRCT2::Plaza
 
     // M1 diagnostics: logs a one-line summary per region (LOG_INFO).
     void LogPlazaDiagnostics();
+
+    // ---- Handoff-fix steering watch (personal fork; DIAGNOSIS items 1-2) ----
+    //
+    // A runtime-only side table beside the region cache above. It holds
+    // no peep state of its own and is never saved, serialised or
+    // networked: it only remembers, per peep id, what the steering system
+    // itself just did (which door landing it delivered the guest to, and
+    // how much net progress recent steering decisions bought). Like the
+    // cache it is cleared wholesale by InvalidatePlazaRegions()
+    // (footpath / entrance actions and park load), and every entry is
+    // additionally bounded by the tick windows below, so a stale entry -
+    // e.g. one left behind by a despawned guest whose id is later
+    // reused - can at worst decline steering for its new owner for a
+    // bounded while. All inputs are synced game state (ticks, tiles,
+    // peep ids): the table is fully deterministic and draws no
+    // ScenarioRand.
+
+    // Re-capture guard: after steering has delivered a goal-directed
+    // guest out of a region (NotePlazaSteerExit) and the guest has been
+    // observed back inside the SAME region with the SAME goal, steering
+    // declines while both bounds hold, so stock pathfinding keeps
+    // uncontested control of the onward route from the landing.
+    inline constexpr uint32_t kPlazaSteerGuardWindowTicks = 1200;
+    inline constexpr int32_t kPlazaSteerGuardRadiusTiles = 4;
+
+    // Progress watchdog: a goal-directed guest whose steering decisions
+    // (NotePlazaSteerDecision calls) reach kPlazaWatchMinDecisions
+    // within one window with at most kPlazaWatchMaxNetTiles of net
+    // displacement from the window anchor and no improvement in goal
+    // distance (beyond kPlazaWatchGoalSlackTiles) is looping: the caller
+    // force-declines steering, resets the guest's stock plan, and the
+    // table suppresses steering for kPlazaWatchCooldownTicks while stock
+    // re-plans.
+    inline constexpr uint32_t kPlazaWatchWindowTicks = 8192;
+    inline constexpr uint32_t kPlazaWatchMinDecisions = 8;
+    inline constexpr int32_t kPlazaWatchMaxNetTiles = 2;
+    inline constexpr int32_t kPlazaWatchGoalSlackTiles = 1;
+    inline constexpr uint32_t kPlazaWatchCooldownTicks = 2048;
+
+    // Records that steering has just issued the final-hop destination
+    // onto a door landing for a goal-directed guest: (regionId, goal) is
+    // the pairing the re-capture guard protects once the guest has been
+    // observed outside the region. Intermediate waypoints toward the
+    // door must NOT be recorded - only the delivery itself.
+    void NotePlazaSteerExit(uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& goal, const TileCoordsXY& landing);
+
+    // Feeds the guard's delivery observation: called on every steering
+    // consultation for a guest, with the region the guest currently
+    // stands in (0 when not on a region tile). Marks a pending exit as
+    // observed once the guest is seen outside the exited region.
+    void ObservePlazaSteerGuest(uint32_t peepId, uint16_t currentRegionId, uint32_t tick);
+
+    // True when the re-capture guard declines steering for this
+    // guest/region/goal pairing. A lapse (window or radius exceeded, or
+    // the goal changed) clears the exit mark as a side effect.
+    bool PlazaSteerGuardDeclines(
+        uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& current, const TileCoordsXYZ& goal, uint32_t tick);
+
+    // True while the watchdog's post-fire cooldown suppresses steering
+    // for this guest.
+    bool PlazaSteerCoolingDown(uint32_t peepId, uint32_t tick);
+
+    // Accounts one steering decision for a goal-directed guest standing
+    // on a region tile. Returns true exactly when the watchdog fires:
+    // the caller must decline steering and give the guest a fresh stock
+    // plan (Peep::resetPathfindGoal); the cooldown above then keeps
+    // steering off the guest while stock re-plans.
+    bool NotePlazaSteerDecision(
+        uint32_t peepId, uint16_t regionId, const TileCoordsXYZ& current, const TileCoordsXYZ& goal, uint32_t tick);
 } // namespace OpenRCT2::Plaza
