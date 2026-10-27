@@ -9,8 +9,6 @@
 
 #include "GuestPathfinding.h"
 
-#include "PlazaRegions.h"
-
 #include "../Diagnostic.h"
 #include "../GameState.h"
 #include "../core/Guard.hpp"
@@ -29,6 +27,7 @@
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
+#include "PlazaRegions.h"
 
 #include <algorithm>
 #include <cassert>
@@ -2185,8 +2184,8 @@ namespace OpenRCT2::PathFinding
      * Returns false when the search reaches no scored end from this door.
      */
     static bool PlazaScoreDoor(
-        Guest& peep, const Plaza::Region& region, const PlazaGrid::Door& door, const TileCoordsXYZ& goal,
-        RideId queueRideIndex, int32_t tileBudget, uint16_t& outScore, uint8_t& outSteps)
+        Guest& peep, const Plaza::Region& region, const PlazaGrid::Door& door, const TileCoordsXYZ& goal, RideId queueRideIndex,
+        int32_t tileBudget, uint16_t& outScore, uint8_t& outSteps)
     {
         const TileCoordsXYZ landing{ door.landing.x, door.landing.y, region.baseZ };
 
@@ -2358,7 +2357,8 @@ namespace OpenRCT2::PathFinding
         auto steerTo = [&](const TileCoordsXYZ& target, bool targetIsDoorLanding) -> bool {
             CoordsXY destination{};
             TileCoordsXYZ destinationTile{};
-            if (!Plaza::ComputeSteerDestination(region, anchor, current, target, targetIsDoorLanding, destination, destinationTile))
+            if (!Plaza::ComputeSteerDestination(
+                    region, anchor, current, target, targetIsDoorLanding, destination, destinationTile))
                 return false;
 
             if (targetIsDoorLanding && destinationTile == target)
@@ -2383,7 +2383,8 @@ namespace OpenRCT2::PathFinding
                     constexpr int32_t kGuestSpreadKeepRightPercent = 65;
                     const uint32_t laneHash = peep.peepId * 2654435761u;
                     const uint32_t laneMix = laneHash ^ (laneHash >> 16);
-                    const int32_t laneMagnitude = static_cast<int32_t>(laneMix % static_cast<uint32_t>(kGuestSpreadLaneMax + 1));
+                    const int32_t laneMagnitude = static_cast<int32_t>(
+                        laneMix % static_cast<uint32_t>(kGuestSpreadLaneMax + 1));
                     const uint32_t sideHashRaw = peep.peepId * 2246822519u;
                     const uint32_t sideMix = sideHashRaw ^ (sideHashRaw >> 16);
                     const bool laneKeepsRight = static_cast<int32_t>(sideMix % 100) < kGuestSpreadKeepRightPercent;
@@ -2450,14 +2451,10 @@ namespace OpenRCT2::PathFinding
             ordered.reserve(region.doors.size());
             for (const auto& door : region.doors)
                 ordered.push_back(&door);
-            std::stable_sort(
-                ordered.begin(), ordered.end(),
-                [&](const PlazaGrid::Door* a, const PlazaGrid::Door* b) {
-                    return PlazaGrid::HeuristicScoreTiles(
-                               { a->landing.x, a->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z)
-                        < PlazaGrid::HeuristicScoreTiles(
-                               { b->landing.x, b->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z);
-                });
+            std::stable_sort(ordered.begin(), ordered.end(), [&](const PlazaGrid::Door* a, const PlazaGrid::Door* b) {
+                return PlazaGrid::HeuristicScoreTiles({ a->landing.x, a->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z)
+                    < PlazaGrid::HeuristicScoreTiles({ b->landing.x, b->landing.y }, { goal.x, goal.y }, region.baseZ, goal.z);
+            });
             if (ordered.size() > Plaza::kPlazaMaxScoredDoors)
                 ordered.resize(Plaza::kPlazaMaxScoredDoors);
 
@@ -2524,8 +2521,7 @@ namespace OpenRCT2::PathFinding
                 // and tile terms keep successive picks by the same guest
                 // from hard-locking onto one door. Same Knuth-multiply +
                 // xor-shift fold as the lane derivation above.
-                const uint32_t doorHash = peep.peepId * 2654435761u
-                    ^ static_cast<uint32_t>(current.x) * 2246822519u
+                const uint32_t doorHash = peep.peepId * 2654435761u ^ static_cast<uint32_t>(current.x) * 2246822519u
                     ^ static_cast<uint32_t>(current.y) * 3266489917u
                     ^ (static_cast<uint32_t>(regionId) + getGameState().currentTicks) * 668265263u;
                 const uint32_t doorMix = doorHash ^ (doorHash >> 16);
@@ -2722,7 +2718,6 @@ namespace OpenRCT2::PathFinding
 
             return GuestPathfindAimless(peep, edges);
         }
-
 
         direction = ChooseDirection(TileCoordsXYZ{ peep.nextLoc }, loc, peep, true, rideIndex);
 

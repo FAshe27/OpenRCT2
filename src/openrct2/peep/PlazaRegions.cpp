@@ -377,7 +377,8 @@ namespace OpenRCT2::Plaza
         }
 
         const PlazaGrid::Tile startTile{ start.x, start.y };
-        const std::vector<PlazaGrid::Tile> bfsPath = PlazaGrid::BfsPath(_regionByTile, width, height, regionId, startTile, goalTile);
+        const std::vector<PlazaGrid::Tile> bfsPath = PlazaGrid::BfsPath(
+            _regionByTile, width, height, regionId, startTile, goalTile);
         if (bfsPath.empty())
             return false;
 
@@ -388,7 +389,8 @@ namespace OpenRCT2::Plaza
         if (bfsPath.size() == 1)
         {
             const PlazaGrid::WorldPoint dest = PlazaGrid::TileCentre({ target.x, target.y });
-            const PlazaGrid::Tile extra = targetIsDoorLanding ? PlazaGrid::Tile{ target.x, target.y } : PlazaGrid::Tile{ -1, -1 };
+            const PlazaGrid::Tile extra = targetIsDoorLanding ? PlazaGrid::Tile{ target.x, target.y }
+                                                              : PlazaGrid::Tile{ -1, -1 };
             if (!PlazaGrid::StaircaseStaysIn(
                     _regionByTile, width, height, regionId, anchor, dest, extra, PlazaGrid::kWalkTolerance))
                 return false;
@@ -397,7 +399,8 @@ namespace OpenRCT2::Plaza
             return true;
         }
 
-        const std::vector<PlazaGrid::Tile> pulled = PlazaGrid::StringPull(_regionByTile, width, height, regionId, bfsPath, anchor);
+        const std::vector<PlazaGrid::Tile> pulled = PlazaGrid::StringPull(
+            _regionByTile, width, height, regionId, bfsPath, anchor);
         if (pulled.empty())
             return false;
 
@@ -444,8 +447,8 @@ namespace OpenRCT2::Plaza
         for (const auto& region : _regions)
         {
             LOG_INFO(
-                "PlazaRegions: region %u z=%d tiles=%zu doors=%zu steerable=%s", region.id, region.baseZ,
-                region.tiles.size(), region.doors.size(), region.steerable() ? "yes" : "no");
+                "PlazaRegions: region %u z=%d tiles=%zu doors=%zu steerable=%s", region.id, region.baseZ, region.tiles.size(),
+                region.doors.size(), region.steerable() ? "yes" : "no");
         }
     }
 } // namespace OpenRCT2::Plaza

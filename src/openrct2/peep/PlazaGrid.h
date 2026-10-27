@@ -41,8 +41,8 @@ namespace OpenRCT2::PlazaGrid
     inline constexpr int32_t kNoFlatPath = -1;
     inline constexpr int32_t kAmbiguousFlatPath = -2;
     inline constexpr int32_t kTileSize = 32;
-    inline constexpr int32_t kWalkStep = 2;        // Peep::updateWalkingAction step size
-    inline constexpr int32_t kWalkTolerance = 2;   // destination tolerance used for steering
+    inline constexpr int32_t kWalkStep = 2;      // Peep::updateWalkingAction step size
+    inline constexpr int32_t kWalkTolerance = 2; // destination tolerance used for steering
 
     struct Tile
     {
@@ -219,8 +219,8 @@ namespace OpenRCT2::PlazaGrid
     // for the (inside, direction) pair. Landings that are themselves region
     // tiles (of any region) are not doors.
     inline std::vector<Door> ExtractDoors(
-        const std::vector<int32_t>& componentId, int32_t width, int32_t height,
-        const std::vector<int32_t>& permittedEdges, const std::vector<char>& landingOk)
+        const std::vector<int32_t>& componentId, int32_t width, int32_t height, const std::vector<int32_t>& permittedEdges,
+        const std::vector<char>& landingOk)
     {
         std::vector<Door> doors;
         for (int32_t y = 0; y < height; y++)

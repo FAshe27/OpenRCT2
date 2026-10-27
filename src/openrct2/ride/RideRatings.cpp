@@ -1773,8 +1773,7 @@ namespace OpenRCT2
 
     static int32_t ride_ratings_scenery_item_cap(int32_t numTrackTiles)
     {
-        return std::min(
-            kSceneryItemCapMax, kSceneryItemCapBase + numTrackTiles / kSceneryTrackTilesPerExtraItem);
+        return std::min(kSceneryItemCapMax, kSceneryItemCapBase + numTrackTiles / kSceneryTrackTilesPerExtraItem);
     }
 
     /**
@@ -1857,14 +1856,12 @@ namespace OpenRCT2
                     TrackBeginEnd trackBeginEnd;
                     if (!trackBlockGetPrevious(current, &trackBeginEnd))
                         break;
-                    if (trackBeginEnd.begin_element == nullptr
-                        || !visitedElements.insert(trackBeginEnd.begin_element).second)
+                    if (trackBeginEnd.begin_element == nullptr || !visitedElements.insert(trackBeginEnd.begin_element).second)
                         break;
                     auto tileCoords = TileCoordsXY(CoordsXY{ trackBeginEnd.begin_x, trackBeginEnd.begin_y });
                     trackTiles.insert(std::make_pair(tileCoords.x, tileCoords.y));
-                    current = CoordsXYE{
-                        CoordsXY{ trackBeginEnd.begin_x, trackBeginEnd.begin_y }, trackBeginEnd.begin_element
-                    };
+                    current = CoordsXYE{ CoordsXY{ trackBeginEnd.begin_x, trackBeginEnd.begin_y },
+                                         trackBeginEnd.begin_element };
                 }
             }
         }

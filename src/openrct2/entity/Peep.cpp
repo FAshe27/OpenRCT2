@@ -694,7 +694,6 @@ namespace OpenRCT2
             stepLength = std::min(stepLength, std::max(x_delta, y_delta));
         }
 
-
         // Crowd following (personal fork, crowd pack): guests only, walking state
         // only - never while queuing, never for staff, never in any other state
         // that reuses this walking step (entering/leaving the park, ride
