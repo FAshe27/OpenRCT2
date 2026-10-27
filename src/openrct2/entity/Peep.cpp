@@ -436,6 +436,110 @@ namespace OpenRCT2
         { 0, -2 },
     };
 
+    // ----- Crowd following (personal fork, crowd pack) - BEGIN -----
+    // Minimal safe following for guests: a guest who is closing on another guest
+    // directly ahead of them - same travel direction, a short lookahead, laterally
+    // close - shortens this tick's step so the gap never closes below a minimum,
+    // down to a 0 step (they hesitate instead of walking through the guest ahead).
+    // This only ever SHORTENS the stock 2-unit step; it never lengthens it, never
+    // steers sideways and never changes the destination, so arrival always wins
+    // over gap-keeping. It is a transient per-tick computation: no new fields, no
+    // save data, no ScenarioRand, and the entity scan order (the spatial index
+    // vectors) is deterministic.
+    //
+    // Cost bound: at most the guests in TWO spatial-index buckets are examined -
+    // the peep's current tile and the one tile ahead in the travel direction
+    // (EntityTileList is one bucket per 32-unit tile; the 12-unit lookahead can
+    // cross at most one tile boundary). No park-wide scans.
+    //
+    // Overtaking (shifting laterally to pass) is deliberately NOT done here: the
+    // destination system owns the sideways coordinate (the guest-spread lane is
+    // baked into the destination by PeepMoveOneTile), so a lateral dodge from
+    // this per-tick step would fight the next destination and weave. Passing
+    // belongs in the lane choice, not here - see the crowd NOTES.
+    static constexpr int32_t kGuestFollowMinGap = 5;
+    static constexpr int32_t kGuestFollowLookahead = 12;
+    static constexpr int32_t kGuestFollowMaxLateral = 5;
+    static constexpr int32_t kGuestFollowMaxZDiff = 16;
+
+    // The direction a peep is travelling in, derived exactly the way
+    // updateWalkingAction derives it (dominant axis towards the destination).
+    // A peep who has effectively arrived (within destination tolerance) is not
+    // travelling; fall back to the direction of the tile step they last chose,
+    // so a stopped leader still counts as a leader to the guest behind them.
+    static int32_t GuestFollowingTravelDirection(const Peep& peep)
+    {
+        CoordsXY differenceLoc = peep.getLocation();
+        differenceLoc -= peep.getDestination();
+        const int32_t xyDistance = std::abs(differenceLoc.x) + std::abs(differenceLoc.y);
+        if (xyDistance <= peep.destinationTolerance)
+        {
+            return peep.peepDirection;
+        }
+
+        if (std::abs(differenceLoc.x) < std::abs(differenceLoc.y))
+        {
+            return (differenceLoc.y >= 0) ? 3 : 1;
+        }
+        return (differenceLoc.x >= 0) ? 0 : 2;
+    }
+
+    // How far (0..nominalAdvance) this peep may step this tick without closing
+    // below kGuestFollowMinGap on the nearest qualifying guest ahead.
+    static int32_t GuestFollowingAllowedAdvance(const Peep& self, int32_t nextDirection, int32_t nominalAdvance)
+    {
+        const int32_t unitX = (nextDirection == 2) ? 1 : (nextDirection == 0) ? -1 : 0;
+        const int32_t unitY = (nextDirection == 1) ? 1 : (nextDirection == 3) ? -1 : 0;
+
+        int32_t nearestForward = kGuestFollowLookahead + 1;
+        const CoordsXY probeTiles[2] = {
+            { self.x, self.y },
+            { self.x + unitX * kCoordsXYStep, self.y + unitY * kCoordsXYStep },
+        };
+        for (const auto& probeTile : probeTiles)
+        {
+            for (auto* other : EntityTileList<Guest>(probeTile))
+            {
+                if (other == &self)
+                    continue;
+                if (other->state != PeepState::walking || !other->isActionWalking())
+                    continue;
+                if (std::abs(other->z - self.z) > kGuestFollowMaxZDiff)
+                    continue;
+                if (GuestFollowingTravelDirection(*other) != nextDirection)
+                    continue;
+
+                const int32_t dx = other->x - self.x;
+                const int32_t dy = other->y - self.y;
+                const int32_t forward = dx * unitX + dy * unitY;
+                const int32_t lateral = std::abs(dx * unitY - dy * unitX);
+                if (forward <= 0 || forward > kGuestFollowLookahead || lateral > kGuestFollowMaxLateral)
+                    continue;
+
+                nearestForward = std::min(nearestForward, forward);
+            }
+        }
+
+        if (nearestForward > kGuestFollowLookahead)
+        {
+            return nominalAdvance;
+        }
+
+        int32_t allowed = std::clamp(nearestForward - kGuestFollowMinGap, 0, nominalAdvance);
+
+        // Arrival wins: if our own destination is nearer than the gap allows,
+        // stop at the destination coordinate on this axis rather than stepping
+        // past it to chase the gap.
+        const auto destination = self.getDestination();
+        const int32_t remaining = (destination.x - self.x) * unitX + (destination.y - self.y) * unitY;
+        if (remaining >= 0)
+        {
+            allowed = std::min(allowed, remaining);
+        }
+        return std::clamp(allowed, 0, nominalAdvance);
+    }
+    // ----- Crowd following - END -----
+
     std::optional<CoordsXY> Peep::updateAction()
     {
         int16_t xy_distance;
@@ -548,7 +652,65 @@ namespace OpenRCT2
         orientation = nextDirection * 8;
 
         CoordsXY loc = { x, y };
-        loc += kWalkingOffsetByDirection[nextDirection];
+
+        // Guest-spread change (personal fork, based on v0.5.6): wider walking-speed spread.
+        // Stock moves every walking peep exactly 2 units per tick along the dominant axis
+        // (kWalkingOffsetByDirection) - there is no per-peep speed anywhere in the game -
+        // so the whole park marches in lockstep. Guests instead get a personal pace of
+        // 0.85x..1.15x stock, expressed as a step numerator over
+        // kGuestPaceDenominator ticks (34/20 = 1.70 units per tick up to 46/20 = 2.30)
+        // and derived deterministically from their peepId with a Knuth multiplicative
+        // hash, as with the path lanes. The per-tick step (1, 2 or 3 units) is the
+        // difference of a floored cumulative distance at the current game tick, offset
+        // by a per-guest phase, so it needs no stored state of any kind: over any 20
+        // consecutive walking ticks a guest covers exactly their numerator in units,
+        // and currentTicks is game state, so saved games and multiplayer stay in sync.
+        // No ScenarioRand() draws. Staff keep the stock step (this only applies to
+        // guests), and queuing guests keep it too: queue shuffling is paced by the
+        // guest in front and by updateQueuePosition, not by free walking, so speeding
+        // or slowing it would bunch or stretch the queue line.
+        int32_t stepLength = 2;
+        if (is<Guest>() && state != PeepState::queuing)
+        {
+            constexpr int32_t kGuestPaceDenominator = 20;
+            constexpr int32_t kGuestPaceNumeratorMin = 34; // 1.70 units/tick = 0.85x stock
+            constexpr int32_t kGuestPaceNumeratorMax = 46; // 2.30 units/tick = 1.15x stock
+            const uint32_t paceHash = peepId * 2654435761u;
+            const uint32_t paceFolded = paceHash ^ (paceHash >> 16);
+            const uint32_t paceSpan = static_cast<uint32_t>(kGuestPaceNumeratorMax - kGuestPaceNumeratorMin + 1);
+            const int32_t paceNumerator = kGuestPaceNumeratorMin + static_cast<int32_t>(paceFolded % paceSpan);
+            const uint64_t paceTick = static_cast<uint64_t>(getGameState().currentTicks)
+                + ((paceFolded >> 8) % static_cast<uint32_t>(kGuestPaceDenominator));
+            const uint64_t paceDistance = (paceTick * static_cast<uint64_t>(paceNumerator))
+                / static_cast<uint64_t>(kGuestPaceDenominator);
+            const uint64_t paceDistancePrev = paceTick == 0
+                ? 0
+                : ((paceTick - 1) * static_cast<uint64_t>(paceNumerator)) / static_cast<uint64_t>(kGuestPaceDenominator);
+            stepLength = static_cast<int32_t>(paceDistance - paceDistancePrev);
+            // Never overshoot the destination on the dominant axis: land exactly on
+            // its coordinate and let the remaining axis (and the tolerance check at
+            // the top of this function) finish the approach, exactly as stock's
+            // fixed step can already land short of or on the destination.
+            stepLength = std::min(stepLength, std::max(x_delta, y_delta));
+        }
+
+
+        // Crowd following (personal fork, crowd pack): guests only, walking state
+        // only - never while queuing, never for staff, never in any other state
+        // that reuses this walking step (entering/leaving the park, ride
+        // approaches, ...). Clamps the nominal step computed above (the stock 2
+        // units, or the guest's personal pace from the block above) so a guest
+        // does not walk through a slower guest directly ahead; see
+        // GuestFollowingAllowedAdvance above. The clamp can only ever shorten
+        // the step, and arrival still wins over the gap.
+        if (state == PeepState::walking && as<Guest>() != nullptr)
+        {
+            stepLength = GuestFollowingAllowedAdvance(*this, nextDirection, stepLength);
+        }
+
+        const auto stepOffset = kWalkingOffsetByDirection[nextDirection];
+        loc.x += (stepOffset.x / 2) * stepLength;
+        loc.y += (stepOffset.y / 2) * stepLength;
 
         updateWalkingAnimation();
 

@@ -38,6 +38,7 @@
 #include "interface/WindowTypes.h"
 #include "management/Research.h"
 #include "network/Network.h"
+#include "peep/PlazaRegions.h"
 #include "platform/Platform.h"
 #include "rct12/CSStringConverter.h"
 #include "ride/Ride.h"
@@ -335,6 +336,10 @@ void GameFixSaveVars()
 
 void GameLoadInit()
 {
+    // V2 plaza walking (personal fork): a loaded / new park invalidates
+    // the runtime plaza region cache (it is rebuilt lazily on first use).
+    Plaza::InvalidatePlazaRegions();
+
     auto* context = GetContext();
 
     IGameStateSnapshots* snapshots = context->GetGameStateSnapshots();

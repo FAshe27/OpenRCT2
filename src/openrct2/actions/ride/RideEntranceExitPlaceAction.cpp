@@ -13,6 +13,7 @@
 #include "../../GameState.h"
 #include "../../core/Guard.hpp"
 #include "../../management/Finance.h"
+#include "../../peep/PlazaRegions.h"
 #include "../../ride/Ride.h"
 #include "../../ride/Station.h"
 #include "../../world/ConstructionClearance.h"
@@ -162,6 +163,8 @@ namespace OpenRCT2::GameActions
             RideClearForConstruction(*ride);
             ride->removePeeps();
         }
+
+        Plaza::InvalidatePlazaRegions();
 
         auto& station = ride->getStation(_stationNum);
         const auto location = _isExit ? station.exit : station.entrance;

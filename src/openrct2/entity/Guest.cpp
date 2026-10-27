@@ -7224,10 +7224,39 @@ namespace OpenRCT2
 
         peep->nauseaTolerance = nausea_tolerance_distribution[nauseaTolerance];
 
+        // Guest-spread change (personal fork, based on v0.5.6): jittered starting needs.
+        // Stock already varies happiness, hunger and thirst by a ScenarioRand() delta of
+        // -15..+16 each (the deltas below are untouched - no ScenarioRand() draws are added
+        // or removed anywhere in this function), but that is a narrow band: with the
+        // default initial hunger/thirst of 200, every guest still walks in within about
+        // 8% of the same needs. So each of the three scenario-configured stats also gets
+        // a deterministic per-guest offset of up to +/-20% of its configured value,
+        // derived from a Knuth multiplicative hash, decorrelated per stat by a different
+        // seed. The hash input is the guest number this guest is about to receive:
+        // peep->peepId is only assigned from gameState.nextGuestNumber further down, so
+        // hash the counter itself. No save-game field and no extra RNG draws, so saved
+        // games and multiplayer stay deterministic. Energy is not jittered here - stock
+        // already randomises it properly (ScenarioRand() % 64 + 65, below) - and nausea
+        // and toilet deliberately start at 0: nobody should arrive already sick or
+        // already desperate for a toilet.
+        constexpr int32_t kGuestNeedsJitterPercent = 20;
+        const uint32_t needsGuestNumber = gameState.nextGuestNumber;
+        auto jitterInitialNeed = [&needsGuestNumber](uint8_t configValue, uint32_t statSeed) -> uint8_t {
+            const int32_t band = (static_cast<int32_t>(configValue) * kGuestNeedsJitterPercent) / 100;
+            if (band <= 0)
+            {
+                return configValue;
+            }
+            uint32_t hash = (needsGuestNumber ^ statSeed) * 2654435761u;
+            hash ^= hash >> 16;
+            const int32_t offset = static_cast<int32_t>(hash % static_cast<uint32_t>(2 * band + 1)) - band;
+            return static_cast<uint8_t>(std::clamp(static_cast<int32_t>(configValue) + offset, 0, 255));
+        };
+
         /* Scenario editor limits initial guest happiness to between 37..253.
          * To be on the safe side, assume the value could have been hacked
          * to any value 0..255. */
-        peep->happiness = gameState.scenarioOptions.guestInitialHappiness;
+        peep->happiness = jitterInitialNeed(gameState.scenarioOptions.guestInitialHappiness, 0x85EBCA6Bu);
         /* Assume a default initial happiness of 0 is wrong and set
          * to 128 (50%) instead. */
         if (gameState.scenarioOptions.guestInitialHappiness == 0)
@@ -7243,7 +7272,7 @@ namespace OpenRCT2
         /* Scenario editor limits initial guest hunger to between 37..253.
          * To be on the safe side, assume the value could have been hacked
          * to any value 0..255. */
-        peep->hunger = gameState.scenarioOptions.guestInitialHunger;
+        peep->hunger = jitterInitialNeed(gameState.scenarioOptions.guestInitialHunger, 0xC2B2AE35u);
         /* Initial value will vary by -15..16 */
         int8_t hungerDelta = (ScenarioRand() & 0x1F) - 15;
         /* Adjust by the delta, clamping at min=0 and max=255. */
@@ -7252,7 +7281,7 @@ namespace OpenRCT2
         /* Scenario editor limits initial guest thirst to between 37..253.
          * To be on the safe side, assume the value could have been hacked
          * to any value 0..255. */
-        peep->thirst = gameState.scenarioOptions.guestInitialThirst;
+        peep->thirst = jitterInitialNeed(gameState.scenarioOptions.guestInitialThirst, 0x27D4EB2Fu);
         /* Initial value will vary by -15..16 */
         int8_t thirstDelta = (ScenarioRand() & 0x1F) - 15;
         /* Adjust by the delta, clamping at min=0 and max=255. */

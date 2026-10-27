@@ -5165,8 +5165,25 @@ namespace OpenRCT2
 
     /**
      * Check for an adjacent station to x,y,z in direction.
+     *
+     * This mirrors the runtime departure-synchronisation test in
+     * Vehicle.Station.cpp (try_add_synchronised_station): scan sideways from
+     * the station start tile, up to kRideAdjacencyCheckDistance tiles of gap,
+     * at a z tolerance of +-2 steps, for a station platform whose ride has
+     * synchronisation enabled. Two faithfulness tightenings over the original
+     * check, both matching what the runtime actually requires before two
+     * trains can depart in sync:
+     *  - the station being checked must not count itself (same ride and same
+     *    station index) as its own synchronisation partner;
+     *  - the partner ride's type must be able to synchronise at all
+     *    (RtdFlag::canSynchroniseWithAdjacentStations), the same gate
+     *    Vehicle::UpdateWaitingToDepart applies before it will hold a train
+     *    for an adjacent station. A partner station of any ride -- including
+     *    another station of this same ride -- otherwise counts, exactly as
+     *    in the runtime test.
      */
-    static bool CheckForAdjacentStation(const CoordsXYZ& stationCoords, uint8_t direction)
+    static bool CheckForAdjacentStation(
+        const CoordsXYZ& stationCoords, uint8_t direction, RideId sourceRideId, StationIndex sourceStationIndex)
     {
         bool found = false;
         int32_t adjX = stationCoords.x;
@@ -5180,8 +5197,14 @@ namespace OpenRCT2
             if (stationElement != nullptr)
             {
                 auto rideIndex = stationElement->asTrack()->getRideIndex();
+                if (rideIndex == sourceRideId && stationElement->asTrack()->getStationIndex() == sourceStationIndex)
+                {
+                    // A station cannot synchronise with itself.
+                    continue;
+                }
                 auto ride = GetRide(rideIndex);
-                if (ride != nullptr && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS))
+                if (ride != nullptr && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS)
+                    && ride->getRideTypeDescriptor().flags.has(RtdFlag::canSynchroniseWithAdjacentStations))
                 {
                     found = true;
                 }
@@ -5210,14 +5233,15 @@ namespace OpenRCT2
                 {
                     continue;
                 }
+                const auto sourceStationIndex = stationElement->asTrack()->getStationIndex();
                 /* Check the first side of the station */
                 int32_t direction = stationElement->getDirectionWithOffset(1);
-                found = CheckForAdjacentStation(stationStart, direction);
+                found = CheckForAdjacentStation(stationStart, direction, ride.id, sourceStationIndex);
                 if (found)
                     break;
                 /* Check the other side of the station */
                 direction = DirectionReverse(direction);
-                found = CheckForAdjacentStation(stationStart, direction);
+                found = CheckForAdjacentStation(stationStart, direction, ride.id, sourceStationIndex);
                 if (found)
                     break;
             }

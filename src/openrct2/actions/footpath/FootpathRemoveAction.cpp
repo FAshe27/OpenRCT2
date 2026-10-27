@@ -14,6 +14,7 @@
 #include "../../OpenRCT2.h"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
+#include "../../peep/PlazaRegions.h"
 #include "../../world/Footpath.h"
 #include "../../world/Location.hpp"
 #include "../../world/Map.h"
@@ -100,6 +101,7 @@ namespace OpenRCT2::GameActions
             FootpathRemoveEdgesAt(_loc, footpathElement);
             MapInvalidateTileFull(_loc);
             TileElementRemove(footpathElement);
+            Plaza::InvalidatePlazaRegions();
             FootpathUpdateQueueChains();
 
             // Remove the spawn point (if there is one in the current tile)

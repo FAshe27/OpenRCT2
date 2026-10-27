@@ -30,6 +30,7 @@
 #include "TrackIteration.h"
 
 #include <iterator>
+#include <set>
 
 namespace OpenRCT2
 {
@@ -162,6 +163,8 @@ namespace OpenRCT2
     static void RideRatingsApplyRequirementStations(RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier);
     static void RideRatingsApplyRequirementSplashdown(RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier);
     static void RideRatingsApplyPenaltyLateralGs(RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier);
+    static void RideRatingsApplyPenaltyPositiveVerticalGs(
+        RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier);
 
     void RideRating::ResetUpdateStates()
     {
@@ -1023,6 +1026,12 @@ namespace OpenRCT2
                     break;
                 case RatingsModifierType::penaltyLateralGs:
                     RideRatingsApplyPenaltyLateralGs(ratings, ride, modifier);
+                    // The excessive positive vertical G ladder rides along on the
+                    // same modifier entry: in every ride type that declares a
+                    // lateral G penalty, its scaling tuple is the G-force scaling
+                    // for that type, so the vertical ladder is scaled exactly like
+                    // the lateral one without needing a second entry per ride type.
+                    RideRatingsApplyPenaltyPositiveVerticalGs(ratings, ride, modifier);
                     break;
                 default:
                     break;
@@ -1746,9 +1755,38 @@ namespace OpenRCT2
         return result;
     }
 
+    // Scenery score constants (fork: scenery is counted along the whole ride,
+    // see ride_ratings_get_scenery_score below).
+    //
+    // Stock counted scenery in the 11x11 square around the first station only
+    // (a Chebyshev radius of 5 tiles) and capped the count at 47 items, for a
+    // maximum score of 47 * 5 = 235. The per-item score (5) and the radius are
+    // unchanged; the cap now grows with the number of track tiles the ride
+    // actually has, so a long, fully themed coaster can earn up to three times
+    // the old maximum while a short ride keeps the old cap:
+    //   cap = min(47 + trackTiles / 4, 141)
+    static constexpr int32_t kSceneryNeighbourhoodRadius = 5;
+    static constexpr int32_t kSceneryItemScore = 5;
+    static constexpr int32_t kSceneryItemCapBase = 47;
+    static constexpr int32_t kSceneryItemCapMax = 141;
+    static constexpr int32_t kSceneryTrackTilesPerExtraItem = 4;
+
+    static int32_t ride_ratings_scenery_item_cap(int32_t numTrackTiles)
+    {
+        return std::min(
+            kSceneryItemCapMax, kSceneryItemCapBase + numTrackTiles / kSceneryTrackTilesPerExtraItem);
+    }
+
     /**
      * Calculates a score based on the surrounding scenery.
      *  rct2: 0x0065E557
+     *
+     * Fork change: stock only sampled the scenery around the first station.
+     * This samples scenery within the same 5-tile radius of every track tile
+     * of the ride, so theming along the whole layout counts, not just theming
+     * clustered at the station. Each tile is only scanned once, however many
+     * track tiles it neighbours. Rides without a walkable track circuit
+     * (flat rides, mazes) keep the original station-centred sampling.
      */
     static int32_t ride_ratings_get_scenery_score(const Ride& ride)
     {
@@ -1778,32 +1816,111 @@ namespace OpenRCT2
             return 40;
         }
 
-        // Count surrounding scenery items
-        int32_t numSceneryItems = 0;
-        auto tileLocation = TileCoordsXY(location);
         auto& gameState = getGameState();
-        for (int32_t yy = std::max(tileLocation.y - 5, 0); yy <= std::min(tileLocation.y + 5, gameState.mapSize.y - 1); yy++)
-        {
-            for (int32_t xx = std::max(tileLocation.x - 5, 0); xx <= std::min(tileLocation.x + 5, gameState.mapSize.x - 1);
-                 xx++)
-            {
-                // Count scenery items on this tile
-                TileElement* tileElement = MapGetFirstElementAt(TileCoordsXY{ xx, yy });
-                if (tileElement == nullptr)
-                    continue;
-                do
-                {
-                    if (tileElement->isGhost())
-                        continue;
 
-                    const auto type = tileElement->getType();
-                    if (type == TileElementType::smallScenery || type == TileElementType::largeScenery)
-                        numSceneryItems++;
-                } while (!(tileElement++)->isLastForTile());
+        // Collect the set of tiles to scan: the neighbourhood of every track
+        // tile of the ride. The track is walked with the same primitives the
+        // proximity loop (ride_ratings_update_state_2 / _5) uses: follow
+        // trackBlockGetNext from the first station until the circuit closes
+        // or the track ends, then trackBlockGetPrevious back to the start of
+        // the layout, so open (shuttle) rides are covered in full as well.
+        // Only the sequence-0 element of each track piece is visited, exactly
+        // as in the proximity loop; multi-tile pieces are covered because
+        // their remaining tiles lie well inside the 5-tile radius.
+        std::set<std::pair<int32_t, int32_t>> trackTiles;
+        if (rtd.specialType != RtdSpecialType::maze)
+        {
+            auto stationStart = ride.getStation(stationIndex).getStart();
+            auto* startTrackElement = MapGetTrackElementAt(stationStart);
+            TileElement* startElement = startTrackElement != nullptr ? startTrackElement->as<TileElement>() : nullptr;
+            if (startElement != nullptr)
+            {
+                std::set<TileElement*> visitedElements;
+                CoordsXYE current{ stationStart, startElement };
+                while (visitedElements.insert(current.element).second)
+                {
+                    auto tileCoords = TileCoordsXY(CoordsXY{ current.x, current.y });
+                    trackTiles.insert(std::make_pair(tileCoords.x, tileCoords.y));
+                    CoordsXYE nextTrackElement;
+                    if (!trackBlockGetNext(&current, &nextTrackElement, nullptr, nullptr))
+                        break;
+                    current = nextTrackElement;
+                }
+
+                // Walk backwards from the station to the start of the layout
+                // (mirrors ride_ratings_update_state_5). Elements already seen
+                // on the forward walk end this walk, so a closed circuit adds
+                // nothing here.
+                current = CoordsXYE{ stationStart, startElement };
+                while (true)
+                {
+                    TrackBeginEnd trackBeginEnd;
+                    if (!trackBlockGetPrevious(current, &trackBeginEnd))
+                        break;
+                    if (trackBeginEnd.begin_element == nullptr
+                        || !visitedElements.insert(trackBeginEnd.begin_element).second)
+                        break;
+                    auto tileCoords = TileCoordsXY(CoordsXY{ trackBeginEnd.begin_x, trackBeginEnd.begin_y });
+                    trackTiles.insert(std::make_pair(tileCoords.x, tileCoords.y));
+                    current = CoordsXYE{
+                        CoordsXY{ trackBeginEnd.begin_x, trackBeginEnd.begin_y }, trackBeginEnd.begin_element
+                    };
+                }
             }
         }
 
-        return std::min(numSceneryItems, 47) * 5;
+        std::set<std::pair<int32_t, int32_t>> candidateTiles;
+        auto addNeighbourhood = [&candidateTiles, &gameState](TileCoordsXY centre) {
+            for (int32_t yy = std::max(centre.y - kSceneryNeighbourhoodRadius, 0);
+                 yy <= std::min(centre.y + kSceneryNeighbourhoodRadius, gameState.mapSize.y - 1); yy++)
+            {
+                for (int32_t xx = std::max(centre.x - kSceneryNeighbourhoodRadius, 0);
+                     xx <= std::min(centre.x + kSceneryNeighbourhoodRadius, gameState.mapSize.x - 1); xx++)
+                {
+                    candidateTiles.insert(std::make_pair(xx, yy));
+                }
+            }
+        };
+        if (trackTiles.empty())
+        {
+            // No track to walk (flat rides, mazes, rides under construction):
+            // fall back to the original station-centred sampling.
+            addNeighbourhood(TileCoordsXY(location));
+        }
+        else
+        {
+            for (const auto& trackTile : trackTiles)
+            {
+                addNeighbourhood(TileCoordsXY{ trackTile.first, trackTile.second });
+            }
+        }
+
+        const int32_t itemCap = ride_ratings_scenery_item_cap(static_cast<int32_t>(trackTiles.size()));
+
+        // Count surrounding scenery items, each candidate tile scanned once.
+        int32_t numSceneryItems = 0;
+        for (const auto& candidateTile : candidateTiles)
+        {
+            // Count scenery items on this tile (identical per-item counting to
+            // stock: every non-ghost small/large scenery element on the tile).
+            TileElement* tileElement = MapGetFirstElementAt(TileCoordsXY{ candidateTile.first, candidateTile.second });
+            if (tileElement == nullptr)
+                continue;
+            do
+            {
+                if (tileElement->isGhost())
+                    continue;
+
+                const auto type = tileElement->getType();
+                if (type == TileElementType::smallScenery || type == TileElementType::largeScenery)
+                    numSceneryItems++;
+            } while (!(tileElement++)->isLastForTile());
+
+            if (numSceneryItems >= itemCap)
+                return itemCap * kSceneryItemScore;
+        }
+
+        return std::min(numSceneryItems, itemCap) * kSceneryItemScore;
     }
 
 #pragma region Ride rating calculation helpers
@@ -1838,7 +1955,16 @@ namespace OpenRCT2
 
     static void RideRatingsApplyBonusSynchronisation(RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier)
     {
-        if ((ride.departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS) && RideHasAdjacentStation(ride))
+        // The bonus is only earned by a ride that can genuinely synchronise a
+        // departure with an adjacent station: its type must support
+        // synchronisation (the same RtdFlag gate Vehicle::UpdateWaitingToDepart
+        // applies before holding a train), synchronisation must be switched on,
+        // and a synchronisation-enabled partner station must actually be
+        // adjacent (see RideHasAdjacentStation, which mirrors the runtime
+        // adjacency test in Vehicle.Station.cpp). Merely ticking the
+        // "synchronise with adjacent stations" checkbox earns nothing.
+        if (ride.getRideTypeDescriptor().flags.has(RtdFlag::canSynchroniseWithAdjacentStations)
+            && (ride.departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS) && RideHasAdjacentStation(ride))
         {
             RideRatingsAdd(ratings, modifier.excitement, modifier.intensity, modifier.nausea);
         }
@@ -2258,6 +2384,64 @@ namespace OpenRCT2
     {
 #ifndef ORIGINAL_RATINGS
         RideRating::Tuple subRating = ride_ratings_get_excessive_lateral_g_penalty(ride);
+        RideRatingsAdd(
+            ratings, (subRating.excitement * modifier.excitement) >> 16, (subRating.intensity * modifier.intensity) >> 16,
+            (subRating.nausea * modifier.nausea) >> 16);
+#endif
+    }
+
+    // Excessive positive vertical G ladder (fork addition).
+    //
+    // Stock ratings reward positive vertical G linearly with no penalty at any
+    // level, while lateral G has a two-tier penalty ladder (see
+    // ride_ratings_get_excessive_lateral_g_penalty above). This ladder mirrors
+    // that one's shape and scale:
+    //   above tier 1: +3.75 intensity, +2.00 nausea (the lateral tier-1 totals);
+    //   above tier 2: those totals rise to +12.25 intensity, +6.00 nausea (the
+    //   lateral tier-2 totals) and the excitement earned from the positive
+    //   vertical G contribution itself is halved.
+    // The thresholds are deliberately conservative. The lateral tiers sit at
+    // 2.80G / 3.10G, about 1.87x / 2.07x the 1.50G at which lateral excitement
+    // stops growing. Positive vertical G is a bigger number in normal design
+    // -- real coasters rarely exceed about 4.5G -- and the only place stock
+    // code singles out a positive vertical G value is Guest.cpp, which treats
+    // a ride pulling more than 5.00G as too intense to board unrated. Tier 1
+    // therefore starts at 5.00G, and tier 2 at 5.50G (the same +10% step the
+    // lateral ladder takes from 2.80G to 3.10G), so only genuinely extreme
+    // designs are penalised.
+    static constexpr fixed16_2dp kExcessivePositiveVerticalGTier1 = MakeFixed16_2dp(5, 00);
+    static constexpr fixed16_2dp kExcessivePositiveVerticalGTier2 = MakeFixed16_2dp(5, 50);
+
+#ifndef ORIGINAL_RATINGS
+    static RideRating::Tuple ride_ratings_get_excessive_positive_vertical_g_penalty(const Ride& ride)
+    {
+        RideRating::Tuple result{};
+        if (ride.maxPositiveVerticalG > kExcessivePositiveVerticalGTier1)
+        {
+            result.intensity = RideRating::make(3, 75);
+            result.nausea = RideRating::make(2, 00);
+        }
+
+        if (ride.maxPositiveVerticalG > kExcessivePositiveVerticalGTier2)
+        {
+            // Remove half of the excitement the positive vertical G factor
+            // contributed in ride_ratings_get_gforce_ratings. Unlike the
+            // lateral ladder, which halves the whole G-force sub-rating, only
+            // the positive vertical component is halved here, so a ride that
+            // trips both ladders does not lose the same excitement twice.
+            result.excitement = -(((ride.maxPositiveVerticalG * 5242) >> 16) / 2);
+            result.intensity = RideRating::make(12, 25);
+            result.nausea = RideRating::make(6, 00);
+        }
+        return result;
+    }
+#endif
+
+    static void RideRatingsApplyPenaltyPositiveVerticalGs(
+        RideRating::Tuple& ratings, const Ride& ride, RatingsModifier modifier)
+    {
+#ifndef ORIGINAL_RATINGS
+        RideRating::Tuple subRating = ride_ratings_get_excessive_positive_vertical_g_penalty(ride);
         RideRatingsAdd(
             ratings, (subRating.excitement * modifier.excitement) >> 16, (subRating.intensity * modifier.intensity) >> 16,
             (subRating.nausea * modifier.nausea) >> 16);
