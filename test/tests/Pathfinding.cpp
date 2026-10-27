@@ -273,8 +273,8 @@ INSTANTIATE_TEST_SUITE_P(
 // BigMapTest.sv6 (the big flat ratings park that RideRatings loads in
 // this same test binary). BigMapTest has a verified-empty flat area at
 // z=14 around x=151..162, y=62..69 (surface-only tiles, no water,
-// park-owned, nothing within 25+ tiles in any direction). In
-// SetUpTestCase the fixture builds the scenario through the ordinary
+// park-owned, nothing within 25+ tiles in any direction). In the
+// test body the fixture builds the scenario through the ordinary
 // game actions:
 //   * an 8x6 plaza of flat footpath at x=151..158, y=62..67, z=14 -
 //     every tile belongs to a 2x2 block of such tiles, so the plaza is
@@ -365,7 +365,16 @@ public:
         GetContext()->LoadParkFromFile(parkPath);
         GameLoadInit(); // NB: calls `setActiveScene`
 
-        BuildPlazaScenario();
+        // NB: the scenario itself is built in the test body, NOT here.
+        // Googletest turns a fatal failure inside SetUpTestCase into a
+        // SKIP for every test in the suite (the failure lands in the
+        // suite's ad-hoc result and TestSuite::Run skips all its tests),
+        // and CTest discards a skipped test's output - so a construction
+        // assertion failing here makes the test silently never run,
+        // which is exactly what CI showed for this suite. In the body
+        // the same assertions fail loudly, with their messages in the
+        // log. Only the context + park load stay here; that pattern is
+        // the stock fixtures' and runs fine in CI.
     }
 
     static void TearDownTestCase()
@@ -584,6 +593,13 @@ std::shared_ptr<IContext> PlazaCrossingTest::_plazaContext;
 
 TEST_F(PlazaCrossingTest, GuestCrossesPlazaToRideEntrance)
 {
+    // Build the scenario here, not in SetUpTestCase: a fatal assertion
+    // in suite setup makes googletest SKIP the suite's tests instead of
+    // failing them (and CTest then hides the message), so construction
+    // failures must happen in the body to be reported. See the note in
+    // SetUpTestCase.
+    BuildPlazaScenario();
+
     ASSERT_PRED_FORMAT1(AssertIsStartPosition, kStart);
 
     auto* ride = FindRideByName("PlazaCrossing");
