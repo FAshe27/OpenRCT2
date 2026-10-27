@@ -431,6 +431,16 @@ namespace OpenRCT2::Plaza
         return true;
     }
 
+    bool SteerSegmentStaysInRegion(
+        const Region& region, const CoordsXY& fromWorld, const CoordsXY& toWorld, const PlazaGrid::Tile& extraAllowed)
+    {
+        if (_dirty || _regionByTile.empty())
+            return false;
+        return PlazaGrid::StaircaseStaysIn(
+            _regionByTile, _cacheMapSize.x, _cacheMapSize.y, region.id, { fromWorld.x, fromWorld.y }, { toWorld.x, toWorld.y },
+            extraAllowed, PlazaGrid::kWalkTolerance);
+    }
+
     void LogPlazaDiagnostics()
     {
         EnsurePlazaRegions();

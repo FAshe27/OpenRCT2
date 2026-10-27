@@ -437,30 +437,82 @@ namespace OpenRCT2
     };
 
     // ----- Crowd following (personal fork, crowd pack) - BEGIN -----
-    // Minimal safe following for guests: a guest who is closing on another guest
-    // directly ahead of them - same travel direction, a short lookahead, laterally
-    // close - shortens this tick's step so the gap never closes below a minimum,
-    // down to a 0 step (they hesitate instead of walking through the guest ahead).
-    // This only ever SHORTENS the stock 2-unit step; it never lengthens it, never
-    // steers sideways and never changes the destination, so arrival always wins
-    // over gap-keeping. It is a transient per-tick computation: no new fields, no
-    // save data, no ScenarioRand, and the entity scan order (the spatial index
+    // Following for walking guests, in three layers, all computed per tick
+    // from current positions and peepIds only: no new fields, no save data,
+    // no ScenarioRand draws, and the entity scan order (the spatial index
     // vectors) is deterministic.
     //
-    // Cost bound: at most the guests in TWO spatial-index buckets are examined -
-    // the peep's current tile and the one tile ahead in the travel direction
-    // (EntityTileList is one bucket per 32-unit tile; the 12-unit lookahead can
-    // cross at most one tile boundary). No park-wide scans.
+    // Layer 1 - following (v1, kept): a guest closing on a qualifying leader
+    // directly ahead shortens this tick's step so the gap never closes below
+    // a minimum. It only ever SHORTENS the nominal step (the stock 2 units or
+    // the guest's personal pace), never lengthens it, never steers sideways
+    // and never changes the destination, so arrival always wins over
+    // gap-keeping.
     //
-    // Overtaking (shifting laterally to pass) is deliberately NOT done here: the
-    // destination system owns the sideways coordinate (the guest-spread lane is
-    // baked into the destination by PeepMoveOneTile), so a lateral dodge from
-    // this per-tick step would fight the next destination and weave. Passing
-    // belongs in the lane choice, not here - see the crowd NOTES.
+    // Layer 2 - passing (v2, defect A "accidental congaline"): NOT done here.
+    // The destination system owns the sideways coordinate (the guest-spread
+    // lane is baked into the destination by PeepMoveOneTile), so a lateral
+    // dodge from this per-tick step would fight the next destination and
+    // weave. Passing lives in the lane choice in GuestPathfinding.cpp
+    // (GuestPassingLane) and in the plaza steering offset there.
+    //
+    // Layer 3 - squeeze-past (v2): when a guest is genuinely held up by a
+    // qualifying leader, the gap clamp is biting, and no passing response
+    // is available for the blocker, the guest may shuffle through at 1 unit per tick
+    // once its per-guest patience (a peepId-hash threshold on how held up it
+    // is) is exceeded. This is the pressure valve for real jams; passing is
+    // always tried first because the lane choice runs at destination time,
+    // before this per-tick clamp is even consulted.
+    //
+    // v2 leader qualification (defect B: head-on freezes, worst at queue
+    // mouths). The v1 test compared only the DOMINANT AXIS of each guest's
+    // aim vector (destination minus position), which aliases: a guest whose
+    // aim is momentarily lateral-dominant (door landings, wide tiles,
+    // entrance aprons, plaza free-vector steering, a queue leaver whose
+    // destination still describes its old queue step) can present the same
+    // axis as an oncoming guest and be certified as its "leader", and once
+    // both sides brake, the lateral correction that would end the alias
+    // stops too, so two streams can stand nose-to-nose indefinitely while
+    // legitimate same-direction followers stack up behind each front. Two
+    // gates fix this: (1) a moving leader must additionally pass a true
+    // same-general-direction test - the dot product of the two aim vectors
+    // must be positive - which no axis aliasing can fake; (2) neither party
+    // may be standing on a queue tile (checked via the path element at the
+    // peep's stepping tile), so queue joiners, the queue line itself and
+    // queue leavers on their first tiles are stock-behaved. A stopped
+    // leader (within its own destination tolerance) has no aim vector to
+    // test; it keeps qualifying through the axis test plus the queue gates,
+    // which is exactly the v1 "stopped leader still counts" behaviour.
+    //
+    // v2 gap (defect C: stop-and-go waves on dense single-tile paths): the
+    // minimum gap adapts to the local corridor count (qualifying leaders
+    // inside the lookahead): 5 units alone, shrinking 1 per extra leader
+    // down to a floor of 2, so a dense stream flows at a tight but non-zero
+    // spacing instead of locking at 5. And while the nearest leader is
+    // still en route, a follower held at a 0 step creeps 1 unit instead
+    // (never into the last unit before a stopped leader), so a moving
+    // stream never fully freezes behind a moving leader.
+    //
+    // Cost bound: at most the guests in TWO spatial-index buckets are
+    // examined - the peep's current tile and the one tile ahead in the
+    // travel direction (EntityTileList is one bucket per 32-unit tile; the
+    // 12-unit lookahead can cross at most one tile boundary). No park-wide
+    // scans.
     static constexpr int32_t kGuestFollowMinGap = 5;
+    static constexpr int32_t kGuestFollowGapFloor = 2;
     static constexpr int32_t kGuestFollowLookahead = 12;
     static constexpr int32_t kGuestFollowMaxLateral = 5;
     static constexpr int32_t kGuestFollowMaxZDiff = 16;
+    // Squeeze-past tuning. kGuestSqueezeSeparation mirrors
+    // kGuestPassingSeparation in GuestPathfinding.cpp: the passing lane sits
+    // one separation to the side of the blocker. kGuestLaneBound mirrors the
+    // guest-spread lane bound kGuestSpreadLaneMax there (+/-8 around the
+    // tile centre line). A passing slot counts as occupied when another
+    // walking guest is within kGuestSqueezeSlotHalfWidth of its centre.
+    static constexpr int32_t kGuestSqueezeSeparation = 8;
+    static constexpr int32_t kGuestLaneBound = 8;
+    static constexpr int32_t kGuestSqueezeSlotHalfWidth = 4;
+    static constexpr int32_t kGuestFollowNearbyCap = 32;
 
     // The direction a peep is travelling in, derived exactly the way
     // updateWalkingAction derives it (dominant axis towards the destination).
@@ -484,14 +536,129 @@ namespace OpenRCT2
         return (differenceLoc.x >= 0) ? 0 : 2;
     }
 
-    // How far (0..nominalAdvance) this peep may step this tick without closing
-    // below kGuestFollowMinGap on the nearest qualifying guest ahead.
+    // True when the peep has effectively arrived at its current destination
+    // (same tolerance test as GuestFollowingTravelDirection). A stopped
+    // leader has no meaningful aim vector, so the same-direction dot-product
+    // gate below is only applied to leaders who are still en route.
+    static bool GuestFollowingHasArrived(const Peep& peep)
+    {
+        CoordsXY differenceLoc = peep.getLocation();
+        differenceLoc -= peep.getDestination();
+        return (std::abs(differenceLoc.x) + std::abs(differenceLoc.y)) <= peep.destinationTolerance;
+    }
+
+    // True when the peep's current stepping tile (nextLoc) is a queue tile.
+    // Queue tiles are where the queue line, its joiners and its leavers
+    // live; following must never engage there, for either party. The gate
+    // covers the queue tiles proper (including the entrance-adjacent queue
+    // tiles at the queue mouth). The open-path tiles in front of the
+    // entrance are ordinary path tiles, where the mouth's conflict is
+    // opposing streams crossing - dissolved by the dot-product gate below
+    // into stock pass-through behaviour.
+    static bool GuestFollowingOnQueueTile(const Peep& peep)
+    {
+        const auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ peep.nextLoc });
+        return pathElement != nullptr && pathElement->isQueue();
+    }
+
+    // Per-guest squeeze-past patience: a held-up threshold in [2, 4], a pure
+    // function of the peepId (Knuth hash, same family as the lane and pace
+    // derivations). Stable for the guest's whole life, so guests in the same
+    // jam start squeezing at different held-up levels and never in lockstep,
+    // with no counter or any other state.
+    static int32_t GuestSqueezePatienceThreshold(const Peep& peep)
+    {
+        const uint32_t hash = peep.peepId * 2654435761u;
+        const uint32_t folded = hash ^ (hash >> 16);
+        return 2 + static_cast<int32_t>((folded >> 5) % 3);
+    }
+
+    // A guest's personal pace numerator, derived exactly as in
+    // updateWalkingAction (34 + the peepId hash fold mod 13). The squeeze
+    // gate below compares the nearest leader's pace against the follower's
+    // to tell whether the lane choice would ever pass that leader.
+    static int32_t GuestFollowingPaceNumerator(const Peep& peep)
+    {
+        const uint32_t hash = peep.peepId * 2654435761u;
+        const uint32_t folded = hash ^ (hash >> 16);
+        return 34 + static_cast<int32_t>(folded % 13);
+    }
+
+    // One nearby walking guest, in the follower's travel frame: forward
+    // distance along the travel axis, and signed lateral offset from the
+    // centre line of the follower's current tile (the frame the guest-spread
+    // lanes live in). Recorded for every walking guest in the scanned
+    // buckets regardless of leader qualification, for the passing-slot test.
+    struct GuestFollowNearby
+    {
+        int32_t forward;
+        int32_t centreLateral;
+    };
+
+    // True when a passing slot exists beside a blocker standing at
+    // blockerCentreLateral: a slot centre one separation to either side,
+    // inside the +/-8 lane bound, with no walking guest alongside it. When
+    // the nearby list overflowed (an extreme crowd in two buckets) the slot
+    // cannot be verified, so no slot is claimed and the squeeze valve may
+    // open - the crowd that overflows the list is precisely the jam the
+    // valve exists for.
+    static bool GuestFollowingPassingSlotFree(
+        int32_t blockerCentreLateral, const GuestFollowNearby* nearby, int32_t nearbyCount, bool nearbyOverflow)
+    {
+        if (nearbyOverflow)
+            return false;
+        for (const int32_t side : { -1, 1 })
+        {
+            const int32_t target = blockerCentreLateral + side * kGuestSqueezeSeparation;
+            if (target < -kGuestLaneBound || target > kGuestLaneBound)
+                continue;
+            bool occupied = false;
+            for (int32_t i = 0; i < nearbyCount; i++)
+            {
+                if (nearby[i].forward >= -4 && nearby[i].forward <= kGuestFollowLookahead + 2
+                    && std::abs(nearby[i].centreLateral - target) <= kGuestSqueezeSlotHalfWidth)
+                {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (!occupied)
+                return true;
+        }
+        return false;
+    }
+
+    // How far (0..nominalAdvance) this peep may step this tick without
+    // closing below the (density-adaptive) minimum gap on the nearest
+    // qualifying guest ahead, with the creep and squeeze relaxations above.
     static int32_t GuestFollowingAllowedAdvance(const Peep& self, int32_t nextDirection, int32_t nominalAdvance)
     {
         const int32_t unitX = (nextDirection == 2) ? 1 : (nextDirection == 0) ? -1 : 0;
         const int32_t unitY = (nextDirection == 1) ? 1 : (nextDirection == 3) ? -1 : 0;
 
+        // Queue gate, follower side: a guest standing on a queue tile keeps
+        // the stock step exactly (queue spacing is updateQueuePosition's
+        // business, not following's).
+        if (GuestFollowingOnQueueTile(self))
+            return nominalAdvance;
+
+        const auto selfDestination = self.getDestination();
+        const int32_t selfAimX = selfDestination.x - self.x;
+        const int32_t selfAimY = selfDestination.y - self.y;
+        const CoordsXY selfTileCentre = CoordsXY{ self.x, self.y }.toTileCentre();
+
         int32_t nearestForward = kGuestFollowLookahead + 1;
+        int32_t nearestCentreLateral = 0;
+        int32_t nearestNumerator = 0;
+        bool nearestEnRoute = false;
+        int32_t corridorCount = 0;
+        int32_t behindPressure = 0;
+        int32_t shoulderPressure = 0;
+
+        GuestFollowNearby nearby[kGuestFollowNearbyCap];
+        int32_t nearbyCount = 0;
+        bool nearbyOverflow = false;
+
         const CoordsXY probeTiles[2] = {
             { self.x, self.y },
             { self.x + unitX * kCoordsXYStep, self.y + unitY * kCoordsXYStep },
@@ -502,21 +669,85 @@ namespace OpenRCT2
             {
                 if (other == &self)
                     continue;
-                if (other->state != PeepState::walking || !other->isActionWalking())
+                if (other->state != PeepState::walking)
                     continue;
                 if (std::abs(other->z - self.z) > kGuestFollowMaxZDiff)
-                    continue;
-                if (GuestFollowingTravelDirection(*other) != nextDirection)
                     continue;
 
                 const int32_t dx = other->x - self.x;
                 const int32_t dy = other->y - self.y;
                 const int32_t forward = dx * unitX + dy * unitY;
-                const int32_t lateral = std::abs(dx * unitY - dy * unitX);
-                if (forward <= 0 || forward > kGuestFollowLookahead || lateral > kGuestFollowMaxLateral)
+                const int32_t centreLateral = (unitX != 0) ? (other->y - selfTileCentre.y) : (other->x - selfTileCentre.x);
+                if (nearbyCount < kGuestFollowNearbyCap)
+                {
+                    nearby[nearbyCount] = { forward, centreLateral };
+                    nearbyCount++;
+                }
+                else
+                {
+                    nearbyOverflow = true;
+                }
+
+                if (!other->isActionWalking())
+                    continue;
+                // Queue gate, leader side: a guest on a queue tile (a line
+                // member, a joiner, a leaver on its first tiles) is never a
+                // leader, whatever its state or heading says.
+                if (GuestFollowingOnQueueTile(*other))
+                    continue;
+                if (GuestFollowingTravelDirection(*other) != nextDirection)
                     continue;
 
-                nearestForward = std::min(nearestForward, forward);
+                const bool otherEnRoute = !GuestFollowingHasArrived(*other);
+                if (otherEnRoute)
+                {
+                    // Same-general-direction gate (defect B): a moving
+                    // leader's aim vector must genuinely agree with ours.
+                    // The axis test above can alias for lateral-dominant
+                    // aims; opposed or crossing aims have a non-positive
+                    // dot product and are rejected here, so oncoming guests
+                    // pass through each other stock-style.
+                    const auto otherDestination = other->getDestination();
+                    const int32_t aimDot = (otherDestination.x - other->x) * selfAimX
+                        + (otherDestination.y - other->y) * selfAimY;
+                    if (aimDot <= 0)
+                        continue;
+                }
+
+                const int32_t lateral = std::abs(dx * unitY - dy * unitX);
+                if (lateral > kGuestFollowMaxLateral)
+                    continue;
+                if (forward < 0 && forward >= -8)
+                {
+                    // A same-direction guest pressed up behind: crowd
+                    // pressure, counted towards held-up-ness below. A jam's
+                    // front guest is held as much by the pack behind it as
+                    // by the blocker ahead - without this term the front
+                    // guest of a single-file jam would never squeeze, and
+                    // the pack compressing behind it could not help.
+                    behindPressure++;
+                    continue;
+                }
+                if (forward == 0)
+                {
+                    // A same-direction guest standing shoulder to shoulder:
+                    // the lateral half of the same crowd pressure (a wall
+                    // of guests abreast at a convergence is one rank deep,
+                    // with nobody behind anybody).
+                    shoulderPressure++;
+                    continue;
+                }
+                if (forward <= 0 || forward > kGuestFollowLookahead)
+                    continue;
+
+                corridorCount++;
+                if (forward < nearestForward)
+                {
+                    nearestForward = forward;
+                    nearestCentreLateral = centreLateral;
+                    nearestNumerator = GuestFollowingPaceNumerator(*other);
+                    nearestEnRoute = otherEnRoute;
+                }
             }
         }
 
@@ -525,13 +756,59 @@ namespace OpenRCT2
             return nominalAdvance;
         }
 
-        int32_t allowed = std::clamp(nearestForward - kGuestFollowMinGap, 0, nominalAdvance);
+        // Density-adaptive gap (defect C): each additional qualifying leader
+        // in the corridor shrinks the gap by 1, down to the floor, so a
+        // dense stream packs tighter instead of accordioning at 5.
+        const int32_t relief = std::min(corridorCount - 1, kGuestFollowMinGap - kGuestFollowGapFloor);
+        const int32_t effectiveGap = kGuestFollowMinGap - relief;
+        int32_t allowed = std::clamp(nearestForward - effectiveGap, 0, nominalAdvance);
+
+        // Minimum creep (defect C): while the nearest leader is still en
+        // route, a fully stopped follower creeps 1 unit, so the stream
+        // keeps flowing at the leader's pace. The nearestForward > 1 guard
+        // keeps the creep from ever closing the final unit onto a leader
+        // who has in the meantime stopped.
+        if (allowed == 0 && nearestEnRoute && nearestForward > 1)
+        {
+            allowed = std::min(1, nominalAdvance);
+        }
+
+        // Squeeze-past (layer 3): if the gap clamp is still biting, the
+        // guest is held up past its personal patience, and passing is not
+        // already handling the blocker, let it shuffle 1 unit through the
+        // blocker rather than stand frozen. Held-up-ness is derived from
+        // this tick's observable state only (see the formula below).
+        // Ends by itself as soon as the blocker is passed (it leaves the
+        // forward window) or passing takes over.
+        if (allowed < nominalAdvance)
+        {
+            // Held-up-ness, all from this tick's observable state: how far
+            // inside the nominal gap the blocker is, how many extra leaders
+            // crowd the corridor, crowd pressure from behind and alongside
+            // (jointly capped), and a flat term when the blocker is not
+            // even moving - a guest parked at the full gap behind a stopped
+            // leader is held up in the only sense that matters, even in a
+            // single rank with an empty corridor behind it.
+            const int32_t heldUp = (kGuestFollowMinGap - nearestForward) + (corridorCount - 1)
+                + std::min(behindPressure + shoulderPressure, 2) + (nearestEnRoute ? 0 : 3);
+            // A free slot beside the blocker only counts as "passing is
+            // handling it" when the lane choice would actually use it: the
+            // leader must be moving AND slower than the follower. A stopped
+            // leader, or a jammed one whose pace derivation is faster than
+            // the follower's, is never passed by the lane choice, so its
+            // free slot must not suppress the valve.
+            const bool passingHandlesIt = nearestEnRoute && nearestNumerator < GuestFollowingPaceNumerator(self)
+                && GuestFollowingPassingSlotFree(nearestCentreLateral, nearby, nearbyCount, nearbyOverflow);
+            if (heldUp >= GuestSqueezePatienceThreshold(self) && !passingHandlesIt)
+            {
+                allowed = std::max(allowed, std::min(1, nominalAdvance));
+            }
+        }
 
         // Arrival wins: if our own destination is nearer than the gap allows,
         // stop at the destination coordinate on this axis rather than stepping
         // past it to chase the gap.
-        const auto destination = self.getDestination();
-        const int32_t remaining = (destination.x - self.x) * unitX + (destination.y - self.y) * unitY;
+        const int32_t remaining = (selfDestination.x - self.x) * unitX + (selfDestination.y - self.y) * unitY;
         if (remaining >= 0)
         {
             allowed = std::min(allowed, remaining);
@@ -701,7 +978,11 @@ namespace OpenRCT2
         // units, or the guest's personal pace from the block above) so a guest
         // does not walk through a slower guest directly ahead; see
         // GuestFollowingAllowedAdvance above. The clamp can only ever shorten
-        // the step, and arrival still wins over the gap.
+        // the step, and arrival still wins over the gap. Following v2: leaders
+        // must be same-general-direction and off queue tiles (both parties),
+        // the gap adapts to corridor density with a minimum creep, and a
+        // squeeze-past valve covers genuine jams; passing itself is done by
+        // the lane choice in GuestPathfinding.cpp, not here.
         if (state == PeepState::walking && as<Guest>() != nullptr)
         {
             stepLength = GuestFollowingAllowedAdvance(*this, nextDirection, stepLength);

@@ -102,6 +102,16 @@ namespace OpenRCT2::Plaza
         const Region& region, const CoordsXY& fromWorld, const TileCoordsXYZ& start, const TileCoordsXYZ& target,
         bool targetIsDoorLanding, CoordsXY& outDestination, TileCoordsXYZ& outTargetTile);
 
+    // True when every staircase the dominant-axis walker would take from
+    // fromWorld to toWorld stays on tiles of the region (plus extraAllowed,
+    // for a steering destination on a door-landing tile). Exposed for the
+    // following-v2 passing offset in GuestPathfinding.cpp, which shifts a
+    // steering destination sideways around a slower guest and must prove the
+    // shifted segment is still a legal in-region walk. Returns false when
+    // the region cache is not built.
+    bool SteerSegmentStaysInRegion(
+        const Region& region, const CoordsXY& fromWorld, const CoordsXY& toWorld, const PlazaGrid::Tile& extraAllowed);
+
     // M1 diagnostics: logs a one-line summary per region (LOG_INFO).
     void LogPlazaDiagnostics();
 } // namespace OpenRCT2::Plaza

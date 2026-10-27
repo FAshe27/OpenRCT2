@@ -12,6 +12,7 @@
 #include "../Diagnostic.h"
 #include "../GameState.h"
 #include "../core/Guard.hpp"
+#include "../entity/EntityList.h"
 #include "../entity/Guest.h"
 #include "../entity/Staff.h"
 #include "../object/PathAdditionEntry.h"
@@ -316,6 +317,225 @@ namespace OpenRCT2::PathFinding
         return false;
     }
 
+    // ----- Passing (personal fork, following v2) - BEGIN -----
+    // Defect A of the big build's following ("accidental congaline"): a
+    // faster guest who caught a slower one crawled behind it forever,
+    // because following (in Peep.cpp) only ever shortens steps and v1
+    // deliberately did no overtaking. Passing belongs in lane choice: when
+    // a walking guest is held up by a slower guest ahead, PeepMoveOneTile
+    // adopts a temporary passing lane - one separation (8 units) to the
+    // side of the blocker, walker's left preferred - for this step's
+    // destination. There is no passing state anywhere: the deviation is
+    // re-derived from current positions on every step. While the blocker
+    // sits inside the alongside window (forward -4..12) the deviation
+    // re-derives identically, so the guest keeps its passing lane across
+    // the ~2 tile steps a pass takes (the walker moves along the dominant
+    // axis, so the lateral gap closes in staircases); once the blocker is
+    // more than 4 behind, the guest's own stable lane resumes untouched.
+    // Gates mirror the following gates in Peep.cpp: guests only, walking
+    // state only, straight steps only (the caller checks the step direction
+    // is unchanged), neither party on a queue tile, the blocker genuinely
+    // slower (personal pace numerators) and genuinely same-direction (aim
+    // vectors agree with the step). The furniture clamp in PeepMoveOneTile
+    // still runs on the final lane afterwards.
+    static constexpr int32_t kGuestPassingSeparation = 8;
+    static constexpr int32_t kGuestPassingLaneBound = 8;
+    static constexpr int32_t kGuestPassingHeldUpLateral = 6;
+    static constexpr int32_t kGuestPassingLookBehind = 4;
+    static constexpr int32_t kGuestPassingLookAhead = 14;
+    static constexpr int32_t kGuestPassingBlockerAhead = 12;
+    static constexpr int32_t kGuestPassingSlotHalfWidth = 4;
+    static constexpr int32_t kGuestPassingNearbyCap = 32;
+    // Same vertical tolerance as kGuestFollowMaxZDiff in Peep.cpp.
+    static constexpr int32_t kGuestPassingMaxZDiff = 16;
+
+    // Mirror of the pace-numerator derivation in Peep::updateWalkingAction
+    // (Peep.cpp): a guest's personal pace as a step numerator over 20
+    // ticks. Duplicated here - exactly as the lane derivation is already
+    // duplicated between PeepMoveOneTile and the plaza door-landing shift -
+    // because the original is a local computation inside a member function.
+    // Pure peepId hash: no save field, no ScenarioRand.
+    static int32_t GuestPassingPaceNumerator(uint32_t peepId)
+    {
+        constexpr int32_t kGuestPaceNumeratorMin = 34; // 1.70 units/tick = 0.85x stock
+        constexpr int32_t kGuestPaceNumeratorSpan = 13;
+        const uint32_t paceHash = peepId * 2654435761u;
+        const uint32_t paceFolded = paceHash ^ (paceHash >> 16);
+        return kGuestPaceNumeratorMin + static_cast<int32_t>(paceFolded % kGuestPaceNumeratorSpan);
+    }
+
+    // True when the peep's current stepping tile is a queue tile (the same
+    // test as GuestFollowingOnQueueTile in Peep.cpp). Passing never engages
+    // in queue context, for either party: queue spacing is stock behaviour.
+    static bool GuestPassingOnQueueTile(const Peep& peep)
+    {
+        const auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ peep.nextLoc });
+        return pathElement != nullptr && pathElement->isQueue();
+    }
+
+    // Decides a passing lane for a guest taking a straight step in
+    // direction. On success returns true and sets outLane to the signed
+    // lane (same space as the lane in PeepMoveOneTile: added to Y on
+    // X-travel, to X on Y-travel, relative to the centre line of the tile
+    // the guest is standing on - consecutive tiles on a straight share that
+    // centre line, so the lane carries onto the destination tile).
+    //
+    // A blocker qualifies in two geometries, both re-derived from current
+    // positions on every step, so the manoeuvre needs no state:
+    //  - approach: the blocker is within kGuestPassingHeldUpLateral of the
+    //    guest's own line, ahead or just alongside. The guest adopts the
+    //    passing lane beside it, walker's left first.
+    //  - alongside: the guest is already sitting one separation to the
+    //    blocker's side (the passing lane it adopted earlier) with the
+    //    blocker still in the forward window. The approach window alone
+    //    would drop the blocker here - the guest is 8 units from it, not
+    //    6 - and the guest's own lane would resume mid-pass, pulling it
+    //    back into the congaline. Recognising the alongside geometry
+    //    keeps the passing lane until the blocker falls behind.
+    static bool GuestPassingLane(const Peep& peep, Direction direction, int32_t& outLane)
+    {
+        if (!peep.is<Guest>() || peep.state != PeepState::walking)
+            return false;
+        if (GuestPassingOnQueueTile(peep))
+            return false;
+
+        const int32_t unitX = CoordsDirectionDelta[direction].x / kCoordsXYStep;
+        const int32_t unitY = CoordsDirectionDelta[direction].y / kCoordsXYStep;
+        const bool xTravel = (unitX != 0);
+        const CoordsXY selfTileCentre = CoordsXY{ peep.nextLoc }.toTileCentre();
+        const int32_t selfLaneCoord = xTravel ? (peep.y - selfTileCentre.y) : (peep.x - selfTileCentre.x);
+        const int32_t myNumerator = GuestPassingPaceNumerator(peep.peepId);
+
+        struct GuestPassingNearby
+        {
+            int32_t forward;
+            int32_t laneCoord;
+        };
+        GuestPassingNearby nearby[kGuestPassingNearbyCap];
+        int32_t nearbyCount = 0;
+        bool hasBlocker = false;
+        int32_t blockerForward = 0;
+        int32_t blockerLaneCoord = 0;
+        bool hasAlongside = false;
+        int32_t alongsideForward = 0;
+        int32_t alongsideLaneCoord = 0;
+
+        auto slotOccupied = [&](int32_t target) {
+            for (int32_t i = 0; i < nearbyCount; i++)
+            {
+                if (nearby[i].forward >= -kGuestPassingLookBehind && nearby[i].forward <= kGuestPassingLookAhead
+                    && std::abs(nearby[i].laneCoord - target) <= kGuestPassingSlotHalfWidth)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const CoordsXY probeTiles[2] = {
+            { peep.x, peep.y },
+            { peep.x + unitX * kCoordsXYStep, peep.y + unitY * kCoordsXYStep },
+        };
+        for (const auto& probeTile : probeTiles)
+        {
+            for (auto* other : EntityTileList<Guest>(probeTile))
+            {
+                if (other == &peep)
+                    continue;
+                if (other->state != PeepState::walking || !other->isActionWalking())
+                    continue;
+                if (std::abs(other->z - peep.z) > kGuestPassingMaxZDiff)
+                    continue;
+                if (GuestPassingOnQueueTile(*other))
+                    continue;
+
+                const int32_t dx = other->x - peep.x;
+                const int32_t dy = other->y - peep.y;
+                const int32_t forward = dx * unitX + dy * unitY;
+                if (forward < -kGuestPassingLookBehind || forward > kGuestPassingLookAhead)
+                    continue;
+                const int32_t laneCoord = xTravel ? (other->y - selfTileCentre.y) : (other->x - selfTileCentre.x);
+                if (nearbyCount < kGuestPassingNearbyCap)
+                {
+                    nearby[nearbyCount] = { forward, laneCoord };
+                    nearbyCount++;
+                }
+
+                // Blocker candidacy: ahead or alongside, genuinely slower,
+                // genuinely heading the same way as this step.
+                if (forward > kGuestPassingBlockerAhead)
+                    continue;
+                const auto otherDestination = other->getDestination();
+                const int32_t aimDot = (otherDestination.x - other->x) * unitX + (otherDestination.y - other->y) * unitY;
+                if (aimDot <= 0)
+                    continue;
+                if (GuestPassingPaceNumerator(other->peepId) >= myNumerator)
+                    continue;
+
+                const int32_t laneDiff = laneCoord - selfLaneCoord;
+                if (std::abs(laneDiff) <= kGuestPassingHeldUpLateral)
+                {
+                    if (!hasBlocker || forward < blockerForward)
+                    {
+                        hasBlocker = true;
+                        blockerForward = forward;
+                        blockerLaneCoord = laneCoord;
+                    }
+                }
+                else if (std::abs(std::abs(laneDiff) - kGuestPassingSeparation) <= 3)
+                {
+                    if (!hasAlongside || forward < alongsideForward)
+                    {
+                        hasAlongside = true;
+                        alongsideForward = forward;
+                        alongsideLaneCoord = laneCoord;
+                    }
+                }
+            }
+        }
+
+        if (hasBlocker)
+        {
+            // Side choice, walker's left first. A positive lane leans
+            // towards direction 1 (+Y) on X-travel and direction 2 (+X) on
+            // Y-travel (see the furniture comment in PeepMoveOneTile), so
+            // in lane coordinates the walker's left hand is +lane when
+            // heading 0 (-X) or 1 (+Y), and -lane when heading 2 (+X) or
+            // 3 (-Y).
+            const int32_t leftSign = (direction == 0 || direction == 1) ? 1 : -1;
+            for (const int32_t sideSign : { leftSign, -leftSign })
+            {
+                const int32_t target = blockerLaneCoord + sideSign * kGuestPassingSeparation;
+                if (target < -8 || target > 8)
+                    continue;
+                if (!slotOccupied(target))
+                {
+                    outLane = target;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (hasAlongside)
+        {
+            // Stay on the side the guest is already passing on; the target
+            // is the alongside blocker's own passing lane, clamped to the
+            // lane bound (the guest may have adopted it while the blocker
+            // stood nearer the edge).
+            const int32_t sideSign = (selfLaneCoord >= alongsideLaneCoord) ? 1 : -1;
+            const int32_t target = std::clamp(
+                alongsideLaneCoord + sideSign * kGuestPassingSeparation, -kGuestPassingLaneBound, kGuestPassingLaneBound);
+            if (!slotOccupied(target))
+            {
+                outLane = target;
+                return true;
+            }
+        }
+        return false;
+    }
+    // ----- Passing - END -----
+
     /**
      *
      *  rct2: 0x0069524E
@@ -331,6 +551,7 @@ namespace OpenRCT2::PathFinding
             return GuestSurfacePathFinding(peep);
         }
 
+        const Direction previousDirection = peep.peepDirection;
         peep.peepDirection = direction;
         if (peep.state != PeepState::queuing)
         {
@@ -399,6 +620,23 @@ namespace OpenRCT2::PathFinding
             const bool laneKeepsRight = static_cast<int32_t>(sideMix % 100) < kGuestSpreadKeepRightPercent;
             const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
             int32_t lane = (direction == 2 || direction == 3) ? laneRight : -laneRight;
+
+            // Passing (following v2, defect A): on a straight step - this
+            // step's direction is the same as the previous step's - a guest
+            // held up by a slower guest ahead adopts a temporary passing
+            // lane instead of its own (see GuestPassingLane above). The
+            // furniture clamp below still applies to the final lane, and
+            // the guest's own lane resumes by itself once the blocker has
+            // been passed: the deviation is re-derived from positions on
+            // every step and never stored anywhere.
+            if (direction == previousDirection)
+            {
+                int32_t passingLane = 0;
+                if (GuestPassingLane(peep, direction, passingLane))
+                {
+                    lane = passingLane;
+                }
+            }
 
             if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
             {
@@ -2273,6 +2511,144 @@ namespace OpenRCT2::PathFinding
         return true;
     }
 
+    // Passing inside plazas (following v2, defect A): the plaza equivalent
+    // of GuestPassingLane. Plaza steering aims the walker at a far
+    // destination with a free vector, so a held-up guest is passed around
+    // by shifting this steering destination sideways: the destination's
+    // lateral offset from the anchor becomes one separation (8 units) to
+    // the side of the blocker, walker's left preferred, with the shift
+    // capped at kGuestPlazaPassMaxShift per steering call - across a
+    // crossing the steering hook runs at every pathfinding decision, so
+    // the offset is progressive and the pass completes over successive
+    // calls, each one re-derived from current positions (no state). The
+    // shifted destination is only accepted when the walker's staircase
+    // from the anchor to it provably stays inside the region
+    // (Plaza::SteerSegmentStaysInRegion, with the door-landing tile as the
+    // allowed extra for final hops); when neither side validates, the
+    // original destination is kept and following alone governs the guest.
+    // Gates mirror the path version: walking guests only, neither party on
+    // a queue tile, the blocker genuinely slower and heading the same
+    // general way (aim vectors agree with the steering vector).
+    static constexpr int32_t kGuestPlazaPassMaxShift = 12;
+    static constexpr int32_t kGuestPlazaPassNearbyCap = 32;
+
+    static void GuestPlazaPassingOffset(
+        Guest& peep, const Plaza::Region& region, const CoordsXY& anchor, const TileCoordsXYZ& target, bool targetIsDoorLanding,
+        CoordsXY& destination)
+    {
+        const int32_t travelX = destination.x - anchor.x;
+        const int32_t travelY = destination.y - anchor.y;
+        if (std::abs(travelX) + std::abs(travelY) < 8)
+            return;
+
+        const int32_t unitX = (std::abs(travelX) >= std::abs(travelY)) ? ((travelX >= 0) ? 1 : -1) : 0;
+        const int32_t unitY = (unitX != 0) ? 0 : ((travelY >= 0) ? 1 : -1);
+        // The walker's left-hand vector for this travel direction: for
+        // +X travel it is -Y, for +Y travel +X, and reversed for the
+        // opposite headings.
+        const int32_t leftX = unitY;
+        const int32_t leftY = -unitX;
+        const int32_t travelForward = travelX * unitX + travelY * unitY;
+        const int32_t destinationLateral = travelX * leftX + travelY * leftY;
+        const int32_t myNumerator = GuestPassingPaceNumerator(peep.peepId);
+
+        struct GuestPlazaPassNearby
+        {
+            int32_t forward;
+            int32_t lateral;
+        };
+        GuestPlazaPassNearby nearby[kGuestPlazaPassNearbyCap];
+        int32_t nearbyCount = 0;
+        bool hasBlocker = false;
+        int32_t blockerForward = 0;
+        int32_t blockerLateral = 0;
+
+        const CoordsXY probeTiles[2] = {
+            { anchor.x, anchor.y },
+            { anchor.x + unitX * kCoordsXYStep, anchor.y + unitY * kCoordsXYStep },
+        };
+        for (const auto& probeTile : probeTiles)
+        {
+            for (auto* other : EntityTileList<Guest>(probeTile))
+            {
+                if (other == &peep)
+                    continue;
+                if (other->state != PeepState::walking || !other->isActionWalking())
+                    continue;
+                if (std::abs(other->z - peep.z) > kGuestPassingMaxZDiff)
+                    continue;
+                if (GuestPassingOnQueueTile(*other))
+                    continue;
+
+                const int32_t relX = other->x - anchor.x;
+                const int32_t relY = other->y - anchor.y;
+                const int32_t forward = relX * unitX + relY * unitY;
+                if (forward < -kGuestPassingLookBehind || forward > kGuestPassingLookAhead)
+                    continue;
+                const int32_t lateral = relX * leftX + relY * leftY;
+                if (nearbyCount < kGuestPlazaPassNearbyCap)
+                {
+                    nearby[nearbyCount] = { forward, lateral };
+                    nearbyCount++;
+                }
+
+                // Blocker candidacy: ahead or alongside, laterally near
+                // the steering line at that forward distance (the line
+                // runs from the anchor to the destination, so its lateral
+                // at the blocker is interpolated), slower, same way.
+                if (forward > kGuestPassingBlockerAhead)
+                    continue;
+                const int32_t lineLateral = (travelForward > 0) ? (destinationLateral * forward / travelForward)
+                                                                : destinationLateral;
+                if (std::abs(lateral - lineLateral) > kGuestPassingHeldUpLateral)
+                    continue;
+                const auto otherDestination = other->getDestination();
+                const int32_t aimDot = (otherDestination.x - other->x) * travelX + (otherDestination.y - other->y) * travelY;
+                if (aimDot <= 0)
+                    continue;
+                if (GuestPassingPaceNumerator(other->peepId) >= myNumerator)
+                    continue;
+                if (!hasBlocker || forward < blockerForward)
+                {
+                    hasBlocker = true;
+                    blockerForward = forward;
+                    blockerLateral = lateral;
+                }
+            }
+        }
+        if (!hasBlocker)
+            return;
+
+        const PlazaGrid::Tile extraAllowed = targetIsDoorLanding ? PlazaGrid::Tile{ target.x, target.y }
+                                                                 : PlazaGrid::Tile{ -1, -1 };
+        for (const int32_t sideSign : { 1, -1 })
+        {
+            const int32_t wantedLateral = blockerLateral + sideSign * kGuestPassingSeparation;
+            const int32_t shift = std::clamp(
+                wantedLateral - destinationLateral, -kGuestPlazaPassMaxShift, kGuestPlazaPassMaxShift);
+            if (shift == 0)
+                continue;
+            bool occupied = false;
+            for (int32_t i = 0; i < nearbyCount; i++)
+            {
+                if (nearby[i].forward >= -kGuestPassingLookBehind && nearby[i].forward <= kGuestPassingLookAhead
+                    && std::abs(nearby[i].lateral - wantedLateral) <= kGuestPassingSlotHalfWidth)
+                {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (occupied)
+                continue;
+            const CoordsXY shifted = { destination.x + leftX * shift, destination.y + leftY * shift };
+            if (Plaza::SteerSegmentStaysInRegion(region, anchor, shifted, extraAllowed))
+            {
+                destination = shifted;
+                return;
+            }
+        }
+    }
+
     /**
      * V2 plaza walking (personal fork): if the peep is standing on a plaza
      * region tile, replace the next one-tile step with a far steering
@@ -2406,6 +2782,11 @@ namespace OpenRCT2::PathFinding
                     break;
                 }
             }
+
+            // Passing (following v2, defect A): shift the steering
+            // destination sideways around a slower guest ahead, validated
+            // to stay inside the region; see GuestPlazaPassingOffset.
+            GuestPlazaPassingOffset(peep, region, anchor, target, targetIsDoorLanding, destination);
 
             // Face along the dominant axis of travel, like the walker does.
             const int32_t dx = destination.x - anchor.x;
