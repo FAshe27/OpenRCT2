@@ -155,6 +155,7 @@ namespace OpenRCT2::GameActions
                     }
                 }
 
+                ride->cancelMorningTestRun();
                 ride->status = RideStatus::closed;
                 ride->flags.unset(RideFlag::passStationNoStopping);
                 ride->raceWinner = EntityId::GetNull();
@@ -175,6 +176,7 @@ namespace OpenRCT2::GameActions
                     return res;
                 }
 
+                ride->cancelMorningTestRun();
                 ride->status = _status;
                 ride->flags.unset(RideFlag::passStationNoStopping);
                 ride->raceWinner = EntityId::GetNull();
@@ -217,6 +219,9 @@ namespace OpenRCT2::GameActions
                         res.errorMessage = modeSwitchResult.Message;
                         return res;
                     }
+                    // A manual test is the player's own: never let a stale
+                    // morning-test arm flip it open afterwards.
+                    ride->cancelMorningTestRun();
                 }
                 else
                 {
@@ -230,7 +235,13 @@ namespace OpenRCT2::GameActions
                 }
 
                 ride->raceWinner = EntityId::GetNull();
-                ride->status = _status;
+                // Morning test run (W2): on the first opening of an in-game
+                // day, an eligible coaster stays in the stock testing state
+                // for one empty circuit; Ride::updateMorningTestRun flips it
+                // to open when every train is back. Manual re-open while a
+                // test is armed lands here too: tryArm refuses (already
+                // armed / already tested today), so the ride opens at once.
+                ride->status = (_status == RideStatus::open && ride->tryArmMorningTestRun()) ? RideStatus::testing : _status;
                 ride->currentIssues = 0;
                 ride->lastIssueTime = 0;
                 ride->getMeasurement();

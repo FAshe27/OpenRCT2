@@ -18,6 +18,7 @@
 #include "../scenario/Scenario.h"
 #include "../world/Map.h"
 #include "../world/MapAnimation.h"
+#include "../world/Weather.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
 #include "Ride.h"
@@ -49,6 +50,11 @@ namespace OpenRCT2
     // Constants
     constexpr uint8_t kTrackSpeedShiftAmount = 16;
     constexpr uint8_t kBoosterAccelerationShiftAmount = 16;
+    // Realism (W3): a wet track offers less rolling resistance, so coaster
+    // trains run slightly faster while it is raining. This is the share of
+    // the stock speed-dependent resistance that remains in the rain.
+    constexpr int32_t kRainResistancePercent = 95;
+
     constexpr int16_t kVehicleMaxSpinSpeedWaterRide = 512;
     constexpr int16_t kVehicleMinSpinSpeedWaterRide = -kVehicleMaxSpinSpeedWaterRide;
 
@@ -1558,8 +1564,16 @@ namespace OpenRCT2
         newAcceleration >>= 9;
 
         int32_t curAcceleration = newAcceleration;
-        curAcceleration -= vehicle->velocity / 4096;
-        curAcceleration -= GetAccelerationDecrease2(vehicle->velocity, totalMass);
+        // The engine has no separate friction coefficient: all speed-dependent
+        // resistance on a train is these two terms (a linear rolling term and
+        // a quadratic, mass-scaled drag term). In the rain, coaster-class
+        // rides keep only kRainResistancePercent of the combined resistance.
+        int32_t resistance = vehicle->velocity / 4096 + GetAccelerationDecrease2(vehicle->velocity, totalMass);
+        if (Weather::isRaining() && RideEntryHasCategory(*rideEntry, RideCategory::rollerCoaster))
+        {
+            resistance = resistance * kRainResistancePercent / 100;
+        }
+        curAcceleration -= resistance;
 
         if (carEntry->flags.has(CarEntryFlag::isPowered))
         {

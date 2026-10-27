@@ -858,6 +858,8 @@ namespace OpenRCT2
 
         RideInspectionUpdate(*this);
 
+        updateMorningTestRun();
+
         // If ride is simulating but crashed, reset the vehicles
         if (status == RideStatus::simulating && flags.has(RideFlag::crashed))
         {
@@ -889,6 +891,134 @@ namespace OpenRCT2
 
         bullwheelLoc = ride.chairliftBullwheelLocation[1].toCoordsXYZ();
         MapInvalidateTileZoom1({ bullwheelLoc, bullwheelLoc.z, bullwheelLoc.z + (4 * kCoordsZStep) });
+    }
+
+    /**
+     * Morning test run (W2 realism build).
+     *
+     * Real parks cycle every coaster empty after the morning inspection,
+     * before the first guests board. The game has no daily dawn to hang this
+     * on -- gDayNightCycle is a monthly darkness envelope, not a time of day
+     * (see ScenarioUpdateDayNightCycle) -- so the trigger is the ride's first
+     * opening of each in-game day: RideSetStatusAction calls this right after
+     * a successful open(), and when it arms, the ride stays in the stock
+     * RideStatus::testing state for exactly one empty circuit instead of
+     * opening. Testing status already provides every guarantee needed:
+     * guests cannot queue for or board a non-open ride (all guest-side ride
+     * paths require RideStatus::open), trains depart empty after a short
+     * wait (Vehicle::TrainReadyToDepart only holds a train while the ride is
+     * open), and block-sectioned stations treat testing exactly like open.
+     * Nobody can be stranded or kicked out: arming only happens on the
+     * closed/testing/simulating -> open transition, when no queue exists.
+     *
+     * Gates (all must hold, otherwise the ride just opens normally):
+     *  - roller coasters only (roadmap item #20 is a coaster ritual);
+     *  - a real track ride that supports the stock test mode, with trains
+     *    actually on track (open() has just created them);
+     *  - not broken down or crashed (trains could not complete a circuit);
+     *  - station synchronisation OFF for this ride: a synced neighbour may
+     *    be open and loaded, and CanDepartSynchronised treats a testing
+     *    partner as ready to depart (it only excludes closed rides), so a
+     *    test circuit cannot be proven isolated from a loaded partner's
+     *    departure logic. Synced coasters simply open as stock in v1;
+     *  - not already test-run today: morningTestLastDayIndex is a runtime
+     *    day stamp (monthsElapsed * 32 + day-of-month), so re-opening a ride
+     *    later the same day (breakdown fix, rain closure) does not re-test.
+     *
+     * Determinism: no ScenarioRand draws, no new persisted fields -- the day
+     * stamp and state are runtime-only members (see Ride.h) and the flip to
+     * open happens in the per-tick simulation (Ride::update), identically on
+     * every client, like breakdown state changes.
+     */
+    bool Ride::tryArmMorningTestRun()
+    {
+        if (morningTestState != MorningTestState::idle)
+            return false;
+        if (gLegacyScene != LegacyScene::playing)
+            return false;
+
+        const auto& rtd = getRideTypeDescriptor();
+        if (rtd.Category != RideCategory::rollerCoaster)
+            return false;
+        if (!rtd.flags.has(RtdFlag::hasTrack) || !supportsStatus(RideStatus::testing))
+            return false;
+        if (!flags.has(RideFlag::onTrack) || numTrains == 0)
+            return false;
+        if (flags.hasAny(RideFlag::brokenDown, RideFlag::crashed))
+            return false;
+        if (departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS)
+            return false;
+
+        const auto& date = GetDate();
+        const uint32_t dayIndex = date.GetMonthsElapsed() * 32u + static_cast<uint32_t>(date.GetDay());
+        if (morningTestLastDayIndex == dayIndex)
+            return false;
+
+        morningTestLastDayIndex = dayIndex;
+        morningTestState = MorningTestState::awaitingDeparture;
+        return true;
+    }
+
+    void Ride::cancelMorningTestRun()
+    {
+        morningTestState = MorningTestState::idle;
+    }
+
+    void Ride::updateMorningTestRun()
+    {
+        if (morningTestState == MorningTestState::idle)
+            return;
+
+        // Failsafe: any status change we did not make (player closed or
+        // re-tested the ride, a breakdown workflow took over, ...) disarms
+        // the machine. RideSetStatusAction also cancels explicitly.
+        if (status != RideStatus::testing)
+        {
+            morningTestState = MorningTestState::idle;
+            return;
+        }
+
+        // A train counts as "home" while it is at a station being (un)loaded
+        // or held ready to depart; anything else (departing, travelling,
+        // arriving, on a lift, held at a block brake -- block-held trains
+        // keep Status::travelling) means the circuit is still in progress.
+        bool anyTrainAway = false;
+        for (uint8_t i = 0; i < numTrains; i++)
+        {
+            const Vehicle* vehicle = getGameState().entities.getEntity<Vehicle>(vehicles[i]);
+            if (vehicle == nullptr)
+                continue;
+            switch (vehicle->status)
+            {
+                case Vehicle::Status::waitingForPassengers:
+                case Vehicle::Status::waitingToDepart:
+                case Vehicle::Status::unloadingPassengers:
+                    break;
+                default:
+                    anyTrainAway = true;
+                    break;
+            }
+            if (anyTrainAway)
+                break;
+        }
+
+        if (morningTestState == MorningTestState::awaitingDeparture)
+        {
+            if (anyTrainAway)
+                morningTestState = MorningTestState::running;
+            return;
+        }
+
+        // Running: the circuit is complete once every train that left is back
+        // at a station. For multi-circuit settings the train does not stop
+        // between laps, so the test run is one full dispatch (all laps) --
+        // the train physically cannot board anyone mid-dispatch anyway.
+        if (!anyTrainAway)
+        {
+            morningTestState = MorningTestState::idle;
+            status = RideStatus::open;
+            windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+        }
     }
 
     /**

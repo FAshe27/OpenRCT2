@@ -212,10 +212,49 @@ namespace OpenRCT2::Park
         return probability;
     }
 
+    // Park day rhythm: shape the main guest-generation probability by time of day.
+    //
+    // The phase source is the date itself (gameState.date.monthTicks), which advances on
+    // every logic tick whether or not any cosmetic option is enabled. gDayNightCycle is
+    // deliberately NOT read here: ScenarioUpdateDayNightCycle() (scenario/Scenario.cpp)
+    // forces it to 0 unless Config general.dayNightCycle is on, so it carries no signal
+    // for ordinary gameplay. monthTicks spans one full day/night cycle (kTicksPerMonth,
+    // +4 per tick in DateUpdate), and the table below is indexed by the same eighths of
+    // that cycle the day/night mapping uses: full daylight spans the wrap-around eighth
+    // [7/8, 1) + [0, 1/8), dusk falls over [1/8, 3/8), full night is [3/8, 5/8) and dawn
+    // rises over [5/8, 7/8). Each eighth lasts exactly 2048 ticks, so the plain mean of
+    // the table is the daily-total factor: the numerators sum to 80 over a denominator
+    // of 10, i.e. exactly 1.00x the stock daily total at a constant stock probability.
+    //   eighth:        0     1     2     3     4     5     6     7
+    //   phase:         mid-  dusk  dusk  night night dawn  dawn  morning
+    //                  day   early late              early late  surge
+    //   multiplier:    1.2   0.9   0.6   0.4   0.4   0.5   1.3   2.7
+    // The shaping is applied to a local copy at the roll site only. The stored
+    // park.guestGenerationProbability (persisted in saves, script-visible) keeps its
+    // stock value, every stock adjustment (soft cap, difficult generation, entrance
+    // fee, awards) is already baked into it before shaping, and the roll still makes
+    // exactly the one ScenarioRand draw stock makes per call -- no draws are added
+    // or skipped, so the ScenarioRand stream stays aligned with stock.
+    static constexpr uint32_t kGuestGenerationTimeOfDayNumerators[] = { 12, 9, 6, 4, 4, 5, 13, 27 };
+    static constexpr uint32_t kGuestGenerationTimeOfDayDenominator = 10;
+
+    static int32_t applyGuestGenerationTimeOfDay(int32_t probability, const Date& date)
+    {
+        if (probability <= 0)
+        {
+            return probability;
+        }
+        const uint32_t eighth = static_cast<uint32_t>(date.GetMonthTicks()) >> 13; // 0..7
+        const auto shaped = (static_cast<uint64_t>(probability) * kGuestGenerationTimeOfDayNumerators[eighth])
+            / kGuestGenerationTimeOfDayDenominator;
+        return static_cast<int32_t>(std::min<uint64_t>(shaped, std::numeric_limits<int32_t>::max()));
+    }
+
     static void generateGuests(ParkData& park, GameState_t& gameState)
     {
-        // Generate a new guest for some probability
-        if (static_cast<int32_t>(ScenarioRand() & 0xFFFF) < park.guestGenerationProbability)
+        // Generate a new guest for some probability (time-of-day shaped, see above)
+        const auto probability = applyGuestGenerationTimeOfDay(park.guestGenerationProbability, gameState.date);
+        if (static_cast<int32_t>(ScenarioRand() & 0xFFFF) < probability)
         {
             bool difficultGeneration = park.flags.has(ParkFlag::difficultGuestGeneration);
             if (!difficultGeneration || park.suggestedGuestMaximum + 150 >= park.numGuestsInPark)

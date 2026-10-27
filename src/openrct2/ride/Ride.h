@@ -263,6 +263,17 @@ namespace OpenRCT2
         hasFixedStationBrakes
     };
 
+    // Morning test run state machine (W2 realism build). Runtime-only: the
+    // state lives in Ride members that are deliberately absent from the
+    // field-by-field serialisation in ParkFile.cpp, so it never reaches a
+    // save file. See Ride::tryArmMorningTestRun in Ride.cpp.
+    enum class MorningTestState : uint8_t
+    {
+        idle,
+        awaitingDeparture,
+        running,
+    };
+
     namespace ShelteredSectionsBits
     {
         constexpr uint8_t kNumShelteredSectionsMask = 0b00011111;
@@ -444,6 +455,16 @@ namespace OpenRCT2
         uint8_t currentIssues{};
         uint32_t lastIssueTime{};
 
+        // Morning test run (W2): runtime-only, NEVER serialised. ParkFile.cpp
+        // writes the rides chunk as an explicit field-by-field list and these
+        // members are not on it (verified at v0.5.6); no other save path writes
+        // the Ride struct wholesale. After a save/load they fall back to their
+        // defaults (idle / no day recorded), so a ride saved mid-test simply
+        // stays in Test mode until the player opens it, and the next opening
+        // on a later in-game day re-arms a test run.
+        MorningTestState morningTestState{ MorningTestState::idle };
+        uint32_t morningTestLastDayIndex{ std::numeric_limits<uint32_t>::max() };
+
     private:
         std::array<RideStation, Limits::kMaxStationsPerRide> stations{};
 
@@ -515,6 +536,15 @@ namespace OpenRCT2
         ResultWithMessage open(bool isApplying);
         ResultWithMessage test(bool isApplying);
         ResultWithMessage simulate(bool isApplying);
+
+        // Morning test run (W2): tryArm is called by RideSetStatusAction right
+        // after a successful open(); when it returns true the action leaves
+        // the ride in RideStatus::testing for one empty circuit instead of
+        // RideStatus::open, and updateMorningTestRun (polled from update())
+        // flips it to open once every train is back at a station.
+        bool tryArmMorningTestRun();
+        void cancelMorningTestRun();
+        void updateMorningTestRun();
 
         RideMode getDefaultMode() const;
 

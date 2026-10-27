@@ -38,11 +38,17 @@
 namespace OpenRCT2::PathFinding
 {
     // The search limits the maximum junctions by certain conditions.
+    // Guest-spread change (personal fork): the whole guest ladder is raised
+    // by 2 (staff untouched), so ordinary guests get the junction budget
+    // stock reserves for map holders / guests leaving the park, and every
+    // intra-guest bonus (map +2, leaving +2, leaving-and-lost +3) is kept.
+    // Total search work stays bounded by the unchanged tiles-checked cap
+    // in ChooseDirection (15,000 for guests).
     static constexpr uint8_t kMaxJunctionsStaff = 8;
-    static constexpr uint8_t kMaxJunctionsGuest = 5;
-    static constexpr uint8_t kMaxJunctionsGuestWithMap = 7;
-    static constexpr uint8_t kMaxJunctionsGuestLeavingPark = 7;
-    static constexpr uint8_t kMaxJunctionsGuestLeavingParkLost = 8;
+    static constexpr uint8_t kMaxJunctionsGuest = 7;
+    static constexpr uint8_t kMaxJunctionsGuestWithMap = 9;
+    static constexpr uint8_t kMaxJunctionsGuestLeavingPark = 9;
+    static constexpr uint8_t kMaxJunctionsGuestLeavingParkLost = 10;
 
     // Maximum amount of junctions.
     static constexpr uint8_t kMaxJunctions = std::max(
