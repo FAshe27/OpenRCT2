@@ -14,6 +14,7 @@
 #include "../core/Guard.hpp"
 #include "../entity/Guest.h"
 #include "../entity/Staff.h"
+#include "../object/PathAdditionEntry.h"
 #include "../profiling/Profiling.h"
 #include "../ride/RideData.h"
 #include "../scenario/Scenario.h"
@@ -192,6 +193,57 @@ namespace OpenRCT2::PathFinding
     }
 
     /**
+     * Guest-spread change (personal fork): returns true if the path element the peep is
+     * about to step onto (at the given destination tile) has a path addition - a bench,
+     * lamp, litter bin etc. - that is drawn on the given edge of that tile.
+     *
+     * A PathElement stores only WHICH addition it carries (hasAddition / getAdditionEntry),
+     * not an edge. The edge is derived exactly the way paintPathAddition derives it when
+     * drawing: an addition is drawn on every edge of the tile that is NOT connected to a
+     * neighbouring path, i.e. (pathElement->getEdges() ^ 0x0F), where the edge bit for a
+     * direction is (1 << direction). The one exception is the jumping fountain, which is
+     * drawn in the centre of the tile rather than on any edge, so it never counts here.
+     * The destination path element is picked with the same Z / slope test the pathfinding
+     * search itself uses (FootpathIsZAndDirectionValid against the peep's next tile Z).
+     */
+    static bool GuestSpreadPathAdditionOnEdge(const CoordsXY& destTile, const Peep& peep, Direction direction, Direction edge)
+    {
+        TileElement* tileElement = MapGetFirstElementAt(destTile);
+        if (tileElement == nullptr)
+        {
+            return false;
+        }
+
+        const int32_t destZ = TileCoordsXYZ(peep.nextLoc).z;
+        do
+        {
+            if (tileElement->isGhost())
+                continue;
+            if (tileElement->getType() != TileElementType::path)
+                continue;
+
+            const auto* pathElement = tileElement->asPath();
+            if (!FootpathIsZAndDirectionValid(*pathElement, destZ, direction))
+                continue;
+
+            // This is the path element the peep is stepping onto; no other element on
+            // this tile can be the destination path.
+            if (!pathElement->hasAddition() || pathElement->additionIsGhost())
+            {
+                return false;
+            }
+            const auto* additionEntry = pathElement->getAdditionEntry();
+            if (additionEntry == nullptr || additionEntry->draw_type == PathAdditionDrawType::jumpingFountain)
+            {
+                return false;
+            }
+            return ((pathElement->getEdges() ^ 0x0F) & (1 << edge)) != 0;
+        } while (!(tileElement++)->isLastForTile());
+
+        return false;
+    }
+
+    /**
      *
      *  rct2: 0x0069524E
      */
@@ -225,20 +277,44 @@ namespace OpenRCT2::PathFinding
             // sideways coordinate to the centre line +/- 3, which funnels every peep through a
             // 7-unit band in the middle of a 32-unit tile - the classic conga line. Instead, give
             // each peep their own "lane" across the width of the path: a sideways offset of
-            // -10..+10, derived deterministically from their peepId (a Knuth multiplicative
+            // -8..+8, derived deterministically from their peepId (a Knuth multiplicative
             // hash, so consecutive guests land in unrelated lanes). Because the lane never
             // changes, a peep walks a straight line parallel to the centre line - no weaving -
             // and corners still vary naturally, as the lane axis swaps at a turn. Deriving it
             // from peepId means no save-game field and no extra ScenarioRand() calls, so
             // saved games and multiplayer stay deterministic. Queues are untouched: this whole
             // block is skipped while queuing, so queue lines stay single file as they must.
-            // To change the spread, change kGuestSpreadLaneMax (10 = feet land 6..26 of 32).
+            // To change the spread, change kGuestSpreadLaneMax (8 = feet land 8..24 of 32).
+            //
+            // Furniture-aware lanes (v1.1): at the widest lanes a peep's sprite overlaps the
+            // benches and lamps that line the edges of a path tile, so they appear to walk
+            // straight through them. So when the destination tile carries a path addition on
+            // the peep's own side of the path, the lane is pulled in to
+            // kGuestSpreadFurnitureLaneMax for that one step; the clear side of the path - and
+            // every unfurnished tile - keeps the full spread. If both sides are furnished the
+            // peep is pulled in either way, which falls out of the same per-side test.
 
             const int8_t offset = (ScenarioRand() & 7) - 3;
-            constexpr int32_t kGuestSpreadLaneMax = 10;
+            constexpr int32_t kGuestSpreadLaneMax = 8;
+            constexpr int32_t kGuestSpreadFurnitureLaneMax = 5;
             const uint32_t laneHash = peep.peepId * 2654435761u;
             const uint32_t laneSpan = static_cast<uint32_t>(2 * kGuestSpreadLaneMax + 1);
-            const int32_t lane = static_cast<int32_t>((laneHash ^ (laneHash >> 16)) % laneSpan) - kGuestSpreadLaneMax;
+            int32_t lane = static_cast<int32_t>((laneHash ^ (laneHash >> 16)) % laneSpan) - kGuestSpreadLaneMax;
+
+            if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
+            {
+                // The peep's lane sits on one side of the centre line. The sideways axis is Y
+                // when moving along X (directions 0/2) and X when moving along Y (1/3), and
+                // the lane is added to that axis below, so a positive lane always leans
+                // towards direction 1 (+Y) resp. direction 2 (+X), a negative lane towards
+                // the reverse direction.
+                const Direction plusSide = (direction == 0 || direction == 2) ? 1 : 2;
+                const Direction laneSide = (lane > 0) ? plusSide : DirectionReverse(plusSide);
+                if (GuestSpreadPathAdditionOnEdge(newTile, peep, direction, laneSide))
+                {
+                    lane = std::clamp(lane, -kGuestSpreadFurnitureLaneMax, kGuestSpreadFurnitureLaneMax);
+                }
+            }
             if (direction == 0 || direction == 2)
             {
                 // Peep is moving along X, so apply the offset to the X position of the
