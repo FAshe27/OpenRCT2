@@ -27,8 +27,9 @@ namespace OpenRCT2::Plaza
         bool _dirty = true; // cache starts dirty (design section 2.3)
         bool _diagnosticsLogged = false;
         TileCoordsXY _cacheMapSize{};
-        std::vector<int32_t> _regionByTile; // PlazaGrid component ids (0 = none), row-major
-        std::vector<Region> _regions;       // index = id - 1
+        std::vector<int32_t> _regionByTile;  // PlazaGrid component ids (0 = none), row-major
+        PlazaGrid::LateralRuns _lateralRuns; // per-tile axis runs over _regionByTile (lateral spread)
+        std::vector<Region> _regions;        // index = id - 1
 
         // Mirrors of the file-static helpers in GuestPathfinding.cpp
         // (GetBannerOnPath / BannerClearPathEdges / PathGetPermittedEdges).
@@ -169,6 +170,7 @@ namespace OpenRCT2::Plaza
             const std::vector<char> eligible = PlazaGrid::ComputeEligible(flatPathZ, width, height);
             const PlazaGrid::Components components = PlazaGrid::LabelComponents(eligible, width, height);
             _regionByTile = components.id;
+            _lateralRuns = PlazaGrid::ComputeLateralRuns(components.id, width, height);
 
             // Pass 2: per-region data. A region's base z is the flat-path z
             // shared by its tiles (same-z by construction of the flood
@@ -349,7 +351,7 @@ namespace OpenRCT2::Plaza
 
     bool ComputeSteerDestination(
         const Region& region, const CoordsXY& fromWorld, const TileCoordsXYZ& start, const TileCoordsXYZ& target,
-        bool targetIsDoorLanding, CoordsXY& outDestination, TileCoordsXYZ& outTargetTile)
+        bool targetIsDoorLanding, int32_t laneRight, CoordsXY& outDestination, TileCoordsXYZ& outTargetTile)
     {
         if (_dirty || _regionByTile.empty())
             return false;
@@ -407,22 +409,86 @@ namespace OpenRCT2::Plaza
         const PlazaGrid::Tile waypoint = pulled.front();
         const bool completesInRegion = (waypoint == goalTile);
 
+        // Index of the waypoint within the BFS path (the pulled tiles are
+        // a subsequence of it): the lateral spread needs to know how far
+        // ahead the pulled waypoint is.
+        size_t waypointIndex = 0;
+        for (size_t i = 1; i < bfsPath.size(); i++)
+        {
+            if (bfsPath[i] == waypoint)
+            {
+                waypointIndex = i;
+                break;
+            }
+        }
+
         if (completesInRegion && targetIsDoorLanding)
         {
             // Final hop: try to aim all the way at the landing tile centre.
             // The staircase from the current anchor to the landing centre
             // must stay on region tiles plus the landing tile itself.
             const PlazaGrid::WorldPoint landingCentre = PlazaGrid::TileCentre({ target.x, target.y });
-            if (PlazaGrid::StaircaseStaysIn(
-                    _regionByTile, width, height, regionId, anchor, landingCentre, { target.x, target.y },
-                    PlazaGrid::kWalkTolerance))
-            {
+            const auto tryLandingHop = [&]() {
+                if (!PlazaGrid::StaircaseStaysIn(
+                        _regionByTile, width, height, regionId, anchor, landingCentre, { target.x, target.y },
+                        PlazaGrid::kWalkTolerance))
+                    return false;
                 outDestination = { landingCentre.x, landingCentre.y };
                 outTargetTile = target;
                 return true;
+            };
+
+            // Region lateral spread (personal fork): the one-shot hop
+            // makes the walker hold the ANCHOR's lateral line for the
+            // whole crossing, so a crowd entering a wide corridor on one
+            // line keeps that line however wide the corridor is (the
+            // playtest "centre river"). A peep already (nearly) on their
+            // own lateral line keeps the hop; a peep off it first aims
+            // at an in-region point on their line (see
+            // PlazaGrid::OffsetWaypointDestination) and takes the hop on
+            // the next steering call from there.
+            const PlazaGrid::SegmentFrame frame = PlazaGrid::FrameForSegment(anchor, PlazaGrid::TileCentre(goalTile));
+            int32_t lineLat = 0;
+            const bool haveLine = PlazaGrid::LateralLineAt(
+                _lateralRuns, width, goalTile, frame.travelAlongX, PlazaGrid::LaneForDirection(laneRight, frame.direction),
+                lineLat);
+            const int32_t anchorLat = frame.travelAlongX ? anchor.y : anchor.x;
+            const bool nearLine = !haveLine || std::abs(anchorLat - lineLat) <= PlazaGrid::kPlazaLineJoinTolerance;
+            if (nearLine && tryLandingHop())
+                return true;
+
+            PlazaGrid::WorldPoint offsetPoint{};
+            PlazaGrid::Tile offsetTile{};
+            if (PlazaGrid::OffsetWaypointDestination(
+                    _regionByTile, _lateralRuns, width, height, regionId, anchor, bfsPath, waypointIndex, true, laneRight,
+                    offsetPoint, offsetTile))
+            {
+                outDestination = { offsetPoint.x, offsetPoint.y };
+                outTargetTile = { offsetTile.x, offsetTile.y, region.baseZ };
+                return true;
             }
+            if (!nearLine && tryLandingHop())
+                return true;
             // Otherwise aim at the door's inside tile; on arrival the next
             // steering call runs the size-1 case above and crosses.
+        }
+        else
+        {
+            // Region lateral spread (personal fork): aim at the pulled
+            // waypoint ON the peep's own lateral line instead of the bare
+            // tile centre, so crossings of wide areas fan across the
+            // width instead of sharing one line. Falls back to the plain
+            // centre whenever no contained offset point exists.
+            PlazaGrid::WorldPoint offsetPoint{};
+            PlazaGrid::Tile offsetTile{};
+            if (PlazaGrid::OffsetWaypointDestination(
+                    _regionByTile, _lateralRuns, width, height, regionId, anchor, bfsPath, waypointIndex, completesInRegion,
+                    laneRight, offsetPoint, offsetTile))
+            {
+                outDestination = { offsetPoint.x, offsetPoint.y };
+                outTargetTile = { offsetTile.x, offsetTile.y, region.baseZ };
+                return true;
+            }
         }
 
         const PlazaGrid::WorldPoint dest = PlazaGrid::TileCentre(waypoint);

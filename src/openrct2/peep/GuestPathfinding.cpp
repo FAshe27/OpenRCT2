@@ -2722,6 +2722,16 @@ namespace OpenRCT2::PathFinding
 
         const CoordsXY anchor = peep.getLocation();
 
+        // The peep's stable lane, derived exactly as in PeepMoveOneTile
+        // (kept duplicated there): the region lateral spread inside
+        // ComputeSteerDestination uses it to place this peep's own line
+        // through the region, and the M4 door-landing shift below uses it
+        // for the final approach point.
+        const uint32_t laneHash = peep.peepId * 2654435761u;
+        const int32_t laneMagnitude = static_cast<int32_t>((laneHash ^ (laneHash >> 13)) % 17) - 8;
+        const bool laneKeepsRight = ((laneHash >> 8) & 3) != 1;
+        const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
+
         // Issues the steering destination computed by the region cache and
         // applies the v1.1 lane idea to the final approach point of a door
         // crossing (M4): when the destination is the centre of a door's
@@ -2729,12 +2739,17 @@ namespace OpenRCT2::PathFinding
         // furniture-clamped to +/-5) exactly as PeepMoveOneTile does, so
         // guests pour out of a plaza spread across the exit tile instead of
         // single file. Queue landings keep the exact centre: queue joins
-        // are positional.
+        // are positional. The shift is applied only when the staircase to
+        // the shifted point is still contained in the region (see
+        // Plaza::SteerSegmentStaysInRegion): the unshifted point was the
+        // validated one, and from an anchor across the region the shifted
+        // staircase could otherwise cut the corner of the tile diagonally
+        // beside the landing.
         auto steerTo = [&](const TileCoordsXYZ& target, bool targetIsDoorLanding) -> bool {
             CoordsXY destination{};
             TileCoordsXYZ destinationTile{};
             if (!Plaza::ComputeSteerDestination(
-                    region, anchor, current, target, targetIsDoorLanding, destination, destinationTile))
+                    region, anchor, current, target, targetIsDoorLanding, laneRight, destination, destinationTile))
                 return false;
 
             if (targetIsDoorLanding && destinationTile == target)
@@ -2748,23 +2763,11 @@ namespace OpenRCT2::PathFinding
                     if (landingPath == nullptr || landingPath->isQueue())
                         break;
 
-                    constexpr int32_t kGuestSpreadLaneMax = 8;
                     constexpr int32_t kGuestSpreadFurnitureLaneMax = 5;
-                    // Same lane derivation as PeepMoveOneTile, including the
-                    // crowd pack's right-hand-traffic bias, with the door
-                    // crossing direction in the role of the travel direction:
-                    // one stable per-guest preference (laneRight), converted
-                    // per direction exactly as there. Pure peepId hash - no
-                    // save field, no ScenarioRand.
-                    constexpr int32_t kGuestSpreadKeepRightPercent = 65;
-                    const uint32_t laneHash = peep.peepId * 2654435761u;
-                    const uint32_t laneMix = laneHash ^ (laneHash >> 16);
-                    const int32_t laneMagnitude = static_cast<int32_t>(
-                        laneMix % static_cast<uint32_t>(kGuestSpreadLaneMax + 1));
-                    const uint32_t sideHashRaw = peep.peepId * 2246822519u;
-                    const uint32_t sideMix = sideHashRaw ^ (sideHashRaw >> 16);
-                    const bool laneKeepsRight = static_cast<int32_t>(sideMix % 100) < kGuestSpreadKeepRightPercent;
-                    const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
+                    // laneRight was derived once for this steering call
+                    // (see above); here it is converted with the door
+                    // crossing direction in the role of the travel
+                    // direction, exactly as PeepMoveOneTile converts it.
                     int32_t lane = (crossing == 2 || crossing == 3) ? laneRight : -laneRight;
                     if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
                     {
@@ -2775,10 +2778,13 @@ namespace OpenRCT2::PathFinding
                             lane = std::clamp(lane, -kGuestSpreadFurnitureLaneMax, kGuestSpreadFurnitureLaneMax);
                         }
                     }
+                    const CoordsXY unshifted = destination;
                     if (crossing == 0 || crossing == 2)
                         destination.y += lane;
                     else
                         destination.x += lane;
+                    if (!Plaza::SteerSegmentStaysInRegion(region, anchor, destination, PlazaGrid::Tile{ target.x, target.y }))
+                        destination = unshifted;
                     break;
                 }
             }

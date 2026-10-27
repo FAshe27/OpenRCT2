@@ -415,6 +415,287 @@ namespace OpenRCT2::PlazaGrid
         return pulled;
     }
 
+    // ------------------------------------------------------------------
+    // Region lateral spread (personal fork).
+    //
+    // The steering above collapses every crossing of a wide area onto one
+    // shared route line: BFS + string-pulling yields the same waypoint
+    // centres for everyone, and the dominant-axis walker then holds the
+    // lateral coordinate of wherever the segment started for ~all of the
+    // segment. On corridor-shaped regions (long, thin, e.g. a 2-wide
+    // path) the whole crowd therefore walks a single band - the entry
+    // row's centre line - and the rest of the width stays empty (the
+    // playtest "centre river" on a widened entrance path).
+    //
+    // The fix gives each peep their OWN parallel line through the region:
+    // their stable lane preference (laneRight in [-8, 8], the peepId-hash
+    // lane of GuestPathfinding.cpp's PeepMoveOneTile) is applied as a
+    // lateral offset from the local cross-section centre of the region -
+    // the middle of the run of region tiles through the waypoint,
+    // perpendicular to travel - scaled by how much width the cross
+    // section actually has:
+    //
+    //   line = crossCentre + lane * usable / 8,
+    //   usable = min(crossHalfWidth - kPlazaLineMargin, kPlazaLineMaxHalfSpread)
+    //
+    // In a 2-wide corridor (cross half-width 32) usable is 22, so the
+    // lanes fan over the full width, 10 units clear of both edges. Where
+    // the region narrows (a doorway tile, a 1-wide neck) the cross
+    // section shrinks and the offset fades with it; nobody is pushed
+    // toward a wall the geometry cannot hold. In a wide open plaza the
+    // cap (22) keeps the offset small relative to the space and tied to
+    // the local route's cross-section, so crossings keep fanning by
+    // route and goal instead of drawing parallel tram lines.
+    //
+    // Every offset point is re-validated with StaircaseStaysIn before it
+    // is issued, and a peep who is not yet on their line is first given a
+    // "join" waypoint a couple of BFS steps ahead on that line - without
+    // it, offsetting only the far waypoint would change nothing, because
+    // the walker holds the anchor's lateral line until the very end of a
+    // long segment. All of it is a deterministic pure function of the
+    // region grid and the peep's lane: no RNG, no stored state.
+    inline constexpr int32_t kPlazaLineMargin = 10;        // min clearance from a region edge, world units
+    inline constexpr int32_t kPlazaLineMaxHalfSpread = 22; // cap on |line - crossCentre|, world units
+    inline constexpr int32_t kPlazaLineJoinTolerance = 4;  // |anchorLat - line| at/below this counts as on-line
+    inline constexpr int32_t kPlazaLineJoinSteps = 2;      // BFS steps ahead for the join waypoint
+    inline constexpr int32_t kPlazaLineLaneMax = 8;        // mirrors kGuestSpreadLaneMax in GuestPathfinding.cpp
+
+    // Per-tile maximal runs of same-component tiles along each axis,
+    // precomputed over the component grid at region-cache rebuild time.
+    // Runs over tiles with component id 0 have length 0.
+    struct LateralRuns
+    {
+        std::vector<int32_t> xStart;  // first tile x of the run along x through each tile
+        std::vector<int32_t> xLength; // run length in tiles (0 = not in any component)
+        std::vector<int32_t> yStart;
+        std::vector<int32_t> yLength;
+    };
+
+    inline LateralRuns ComputeLateralRuns(const std::vector<int32_t>& componentId, int32_t width, int32_t height)
+    {
+        LateralRuns runs;
+        const size_t total = static_cast<size_t>(width) * static_cast<size_t>(height);
+        runs.xStart.assign(total, 0);
+        runs.xLength.assign(total, 0);
+        runs.yStart.assign(total, 0);
+        runs.yLength.assign(total, 0);
+
+        for (int32_t y = 0; y < height; y++)
+        {
+            int32_t x = 0;
+            while (x < width)
+            {
+                const int32_t id = componentId[static_cast<size_t>(GridIndex(width, { x, y }))];
+                if (id == 0)
+                {
+                    x++;
+                    continue;
+                }
+                int32_t end = x;
+                while (end + 1 < width && componentId[static_cast<size_t>(GridIndex(width, { end + 1, y }))] == id)
+                    end++;
+                for (int32_t i = x; i <= end; i++)
+                {
+                    const size_t idx = static_cast<size_t>(GridIndex(width, { i, y }));
+                    runs.xStart[idx] = x;
+                    runs.xLength[idx] = end - x + 1;
+                }
+                x = end + 1;
+            }
+        }
+        for (int32_t x = 0; x < width; x++)
+        {
+            int32_t y = 0;
+            while (y < height)
+            {
+                const int32_t id = componentId[static_cast<size_t>(GridIndex(width, { x, y }))];
+                if (id == 0)
+                {
+                    y++;
+                    continue;
+                }
+                int32_t end = y;
+                while (end + 1 < height && componentId[static_cast<size_t>(GridIndex(width, { x, end + 1 }))] == id)
+                    end++;
+                for (int32_t i = y; i <= end; i++)
+                {
+                    const size_t idx = static_cast<size_t>(GridIndex(width, { x, i }));
+                    runs.yStart[idx] = y;
+                    runs.yLength[idx] = end - y + 1;
+                }
+                y = end + 1;
+            }
+        }
+        return runs;
+    }
+
+    // The cross-section of the region at a tile, along one lateral axis:
+    // the centre world coordinate and half-width (world units) of the run
+    // of region tiles through the tile on that axis. lateralAlongY selects
+    // the y run (travel along x) versus the x run (travel along y).
+    // Returns false when the tile is in no component.
+    inline bool CrossSection(
+        const LateralRuns& runs, int32_t width, Tile tile, bool lateralAlongY, int32_t& outCentre, int32_t& outHalfWidth)
+    {
+        const size_t idx = static_cast<size_t>(GridIndex(width, tile));
+        const int32_t length = lateralAlongY ? runs.yLength[idx] : runs.xLength[idx];
+        if (length <= 0)
+            return false;
+        const int32_t start = lateralAlongY ? runs.yStart[idx] : runs.xStart[idx];
+        outCentre = start * kTileSize + length * (kTileSize / 2);
+        outHalfWidth = length * (kTileSize / 2);
+        return true;
+    }
+
+    // The dominant-axis frame of a steering segment, in the walker's own
+    // terms (ties go to the x axis, as in SimulateStaircase).
+    struct SegmentFrame
+    {
+        bool travelAlongX{};
+        int32_t direction{}; // game direction of travel: 0=-x, 1=+y, 2=+x, 3=-y
+    };
+
+    inline SegmentFrame FrameForSegment(WorldPoint from, WorldPoint to)
+    {
+        const int32_t dx = to.x - from.x;
+        const int32_t dy = to.y - from.y;
+        if (std::abs(dy) > std::abs(dx))
+            return { false, dy >= 0 ? 1 : 3 };
+        return { true, dx >= 0 ? 2 : 0 };
+    }
+
+    // Converts the direction-free lane preference into the signed lateral
+    // offset for one travel direction: the exact conversion
+    // PeepMoveOneTile applies (positive lane leans toward +y on x-travel
+    // and toward +x on y-travel).
+    inline constexpr int32_t LaneForDirection(int32_t laneRight, int32_t direction)
+    {
+        return (direction == 2 || direction == 3) ? laneRight : -laneRight;
+    }
+
+    // The lateral world coordinate of one peep's line at a tile, for a
+    // segment travelling along travelAlongX with the given (already
+    // direction-converted) lane. Returns false when the tile has no
+    // cross-section or the cross-section is too narrow to hold any
+    // spread (usable <= 0); the caller then keeps today's behaviour.
+    inline bool LateralLineAt(
+        const LateralRuns& runs, int32_t width, Tile tile, bool travelAlongX, int32_t lane, int32_t& outLineLat)
+    {
+        int32_t centre = 0;
+        int32_t halfWidth = 0;
+        if (!CrossSection(runs, width, tile, travelAlongX, centre, halfWidth))
+            return false;
+        const int32_t usable = std::min(halfWidth - kPlazaLineMargin, kPlazaLineMaxHalfSpread);
+        if (usable <= 0)
+            return false;
+        outLineLat = centre + lane * usable / kPlazaLineLaneMax;
+        return true;
+    }
+
+    // Chooses a laterally-offset steering destination for one segment,
+    // replacing the plain centre of bfsPath[waypointIndex]:
+    //
+    //  - Join: when the peep is off their line by more than
+    //    kPlazaLineJoinTolerance and the pulled waypoint is more than
+    //    kPlazaLineJoinSteps BFS steps ahead, the destination is the
+    //    tile kPlazaLineJoinSteps ahead, at the line's lateral
+    //    coordinate - the peep reaches their line within the first few
+    //    tiles and then stays on it (the walker holds the anchor's
+    //    lateral line for the rest of each segment).
+    //  - Otherwise the destination is the waypoint centre with its
+    //    lateral coordinate moved onto the line. When completesPath is
+    //    set (the waypoint is the endpoint tile: a door's inside tile or
+    //    an in-region goal), the offset is clamped into that tile, so
+    //    arrival and queue semantics on the endpoint are unchanged.
+    //
+    // Every candidate point is validated with StaircaseStaysIn from the
+    // anchor before it is returned; on any failure the function returns
+    // false and the caller uses the plain waypoint centre, exactly as
+    // before this spread existed. outTile is the tile the returned point
+    // lies in (an offset point may sit in the neighbouring row's tile).
+    inline bool OffsetWaypointDestination(
+        const std::vector<int32_t>& componentId, const LateralRuns& runs, int32_t width, int32_t height, int32_t regionId,
+        WorldPoint anchor, const std::vector<Tile>& bfsPath, size_t waypointIndex, bool completesPath, int32_t laneRight,
+        WorldPoint& outPoint, Tile& outTile)
+    {
+        if (waypointIndex == 0 || waypointIndex >= bfsPath.size())
+            return false;
+        const Tile waypoint = bfsPath[waypointIndex];
+        const WorldPoint waypointCentre = TileCentre(waypoint);
+
+        SegmentFrame frame = FrameForSegment(anchor, waypointCentre);
+        if (std::abs(waypointCentre.x - anchor.x) <= 4 && std::abs(waypointCentre.y - anchor.y) <= 4 && bfsPath.size() >= 2)
+        {
+            // The anchor is (nearly) on the waypoint centre, so the
+            // segment delta carries no direction: frame by the first BFS
+            // step instead.
+            const Tile step{ bfsPath[1].x - bfsPath[0].x, bfsPath[1].y - bfsPath[0].y };
+            if (step.x != 0)
+                frame = { true, step.x > 0 ? 2 : 0 };
+            else if (step.y != 0)
+                frame = { false, step.y > 0 ? 1 : 3 };
+        }
+        const int32_t lane = LaneForDirection(laneRight, frame.direction);
+        const int32_t anchorLat = frame.travelAlongX ? anchor.y : anchor.x;
+
+        int32_t lineLat = 0;
+        if (!LateralLineAt(runs, width, waypoint, frame.travelAlongX, lane, lineLat))
+            return false;
+
+        if (waypointIndex > static_cast<size_t>(kPlazaLineJoinSteps) && std::abs(anchorLat - lineLat) > kPlazaLineJoinTolerance)
+        {
+            const Tile joinTile = bfsPath[static_cast<size_t>(kPlazaLineJoinSteps)];
+            int32_t joinLineLat = 0;
+            if (LateralLineAt(runs, width, joinTile, frame.travelAlongX, lane, joinLineLat))
+            {
+                WorldPoint joinPoint = TileCentre(joinTile);
+                if (frame.travelAlongX)
+                    joinPoint.y = joinLineLat;
+                else
+                    joinPoint.x = joinLineLat;
+                if (StaircaseStaysIn(componentId, width, height, regionId, anchor, joinPoint, { -1, -1 }, kWalkTolerance))
+                {
+                    outPoint = joinPoint;
+                    outTile = TileOfWorld(joinPoint);
+                    return true;
+                }
+            }
+            // Join not containable from here: fall through to the offset
+            // waypoint, which still bends the end of the segment.
+        }
+
+        WorldPoint point = waypointCentre;
+        if (completesPath)
+        {
+            // Clamp well inside the endpoint tile (6 units, comfortably
+            // more than the walk tolerance of 2): the peep's arrival tile
+            // - which the next steering call starts from - is then
+            // guaranteed to be the endpoint tile itself, not the
+            // neighbouring row the peep happens to stop across the seam
+            // of.
+            const int32_t tileLatStart = (frame.travelAlongX ? waypoint.y : waypoint.x) * kTileSize;
+            const int32_t clamped = std::clamp(lineLat, tileLatStart + 6, tileLatStart + kTileSize - 6);
+            if (frame.travelAlongX)
+                point.y = clamped;
+            else
+                point.x = clamped;
+        }
+        else
+        {
+            if (frame.travelAlongX)
+                point.y = lineLat;
+            else
+                point.x = lineLat;
+        }
+        if (point == waypointCentre)
+            return false;
+        if (!StaircaseStaysIn(componentId, width, height, regionId, anchor, point, { -1, -1 }, kWalkTolerance))
+            return false;
+        outPoint = point;
+        outTile = TileOfWorld(point);
+        return true;
+    }
+
     // Heuristic score identical in shape to the game's
     // CalculateHeuristicPathingScore (tile units): used only to order doors
     // before the (authoritative) stock heuristic search scores them.

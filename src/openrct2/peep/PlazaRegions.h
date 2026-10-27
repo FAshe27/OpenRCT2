@@ -98,9 +98,16 @@ namespace OpenRCT2::Plaza
     // final hop) - this is proven by simulating the walker, see
     // PlazaGrid::StaircaseStaysIn. Returns false when no in-region path
     // exists; the caller must fall back to stock behaviour.
+    // laneRight is the guest's own lane preference in PeepMoveOneTile's
+    // convention (positive = keep-right side of travel), used by the region
+    // lateral spread: inside the region the guest follows a parallel line
+    // offset from the shared route by laneRight scaled with the local
+    // cross-section width of the region (see PlazaGrid::LateralLineAt). The
+    // offset fades to zero where the region narrows, and every offset
+    // destination is containment-validated before it is returned.
     bool ComputeSteerDestination(
         const Region& region, const CoordsXY& fromWorld, const TileCoordsXYZ& start, const TileCoordsXYZ& target,
-        bool targetIsDoorLanding, CoordsXY& outDestination, TileCoordsXYZ& outTargetTile);
+        bool targetIsDoorLanding, int32_t laneRight, CoordsXY& outDestination, TileCoordsXYZ& outTargetTile);
 
     // True when every staircase the dominant-axis walker would take from
     // fromWorld to toWorld stays on tiles of the region (plus extraAllowed,
