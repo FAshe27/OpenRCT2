@@ -253,8 +253,8 @@ namespace OpenRCT2::Park
     static void generateGuests(ParkData& park, GameState_t& gameState)
     {
         // Generate a new guest for some probability (time-of-day shaped, see above)
-        const auto probability = applyGuestGenerationTimeOfDay(park.guestGenerationProbability, gameState.date);
-        if (static_cast<int32_t>(ScenarioRand() & 0xFFFF) < probability)
+        const auto shapedProbability = applyGuestGenerationTimeOfDay(park.guestGenerationProbability, gameState.date);
+        if (static_cast<int32_t>(ScenarioRand() & 0xFFFF) < shapedProbability)
         {
             bool difficultGeneration = park.flags.has(ParkFlag::difficultGuestGeneration);
             if (!difficultGeneration || park.suggestedGuestMaximum + 150 >= park.numGuestsInPark)
