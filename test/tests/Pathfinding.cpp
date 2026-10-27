@@ -449,7 +449,18 @@ protected:
     {
         GameActions::FootpathPlaceAction action(
             tile.toCoordsXYZ(), FootpathSlope{ FootpathSlopeType::flat, kInvalidDirection }, pathSurface, pathRailings);
-        const auto result = GameActions::Execute(&action, getGameState());
+        // NB: every game action in this fixture runs through ExecuteNested,
+        // never the top-level GameActions::Execute. A test body runs outside
+        // game update code (gInUpdateCode is false), and in that situation
+        // the top-level entry point only VALIDATES the action and defers it
+        // to the action queue, returning the query verdict as if it had run
+        // - the action itself would not execute until a game update drains
+        // the queue, which this fixture never performs. (The first CI
+        // execution of this test showed exactly that: RideCreateAction
+        // "succeeded" yet no ride existed afterwards.) ExecuteNested runs
+        // the action synchronously and returns the real Execute() result -
+        // the same mechanism the engine itself uses for subordinate actions.
+        const auto result = GameActions::ExecuteNested(&action, getGameState());
         ASSERT_EQ(result.error, GameActions::Status::ok)
             << "FootpathPlaceAction failed at " << tile << " with status " << static_cast<int32_t>(result.error);
     }
@@ -497,28 +508,13 @@ protected:
         const auto donorEntranceStyle = donor->entranceStyle;
         const auto donorInspection = donor->inspectionInterval;
 
-        // Remember the existing ride ids so the new ride can be found
-        // afterwards (RideCreateAction does not hand it back directly).
-        std::set<uint32_t> existingRideIds;
-        for (auto& ride : RideManager(gameState))
-        {
-            existingRideIds.insert(ride.id.ToUnderlying());
-        }
-
         GameActions::RideCreateAction createAction(donorType, donorSubtype, 0, 0, donorEntranceStyle, donorInspection);
-        auto result = GameActions::Execute(&createAction, gameState);
+        auto result = GameActions::ExecuteNested(&createAction, gameState);
         ASSERT_EQ(result.error, GameActions::Status::ok)
             << "RideCreateAction failed with status " << static_cast<int32_t>(result.error);
 
-        Ride* ride = nullptr;
-        for (auto& candidate : RideManager(gameState))
-        {
-            if (existingRideIds.count(candidate.id.ToUnderlying()) == 0)
-            {
-                ride = &candidate;
-                break;
-            }
-        }
+        // RideCreateAction hands the new ride's id back in its result.
+        Ride* ride = GetRide(result.getData<RideId>());
         ASSERT_NE(ride, nullptr) << "RideCreateAction reported success but no new ride appeared";
         ride->customName = "PlazaCrossing";
 
@@ -545,7 +541,7 @@ protected:
         GameActions::RideEntranceExitPlaceAction entranceAction(
             TileCoordsXY{ kEntranceX, kEntranceY }.toCoordsXY(), kEntranceDirection, ride->id, StationIndex::FromUnderlying(0),
             false);
-        result = GameActions::Execute(&entranceAction, gameState);
+        result = GameActions::ExecuteNested(&entranceAction, gameState);
         ASSERT_EQ(result.error, GameActions::Status::ok)
             << "RideEntranceExitPlaceAction failed with status " << static_cast<int32_t>(result.error);
 
