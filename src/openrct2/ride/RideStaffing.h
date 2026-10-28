@@ -11,6 +11,11 @@
 
 #include "Ride.h"
 
+namespace OpenRCT2
+{
+    struct Staff;
+} // namespace OpenRCT2
+
 namespace OpenRCT2::RideStaffing
 {
     // Operator staffing for rides and stalls (the Worker staff type).
@@ -65,18 +70,41 @@ namespace OpenRCT2::RideStaffing
     // stretch remain open-only.
     bool IsDispatchBlocked(const Ride& ride);
 
-    // The opening gate's top-up switch (staff list, Workers tab). Enabled
-    // unless the player turned it off for this park; the flag is stored
-    // inverted so pre-toggle saves read as enabled.
-    bool IsAutoAssignOnOpenEnabled();
+    // The staff-list auto-assign toggle (Workers tab), under its redefined
+    // contract: its ONLY effect is at hire time (AssignNewWorker below). It
+    // never assigns an existing worker, never tops a crew up, and does not
+    // gate dispatch - assigned workers are sent to their posts by the staff
+    // think regardless of it. Enabled unless the player turned it off for
+    // this park; the flag is stored inverted (ParkFlag::
+    // workersAutoAssignDisabled - a historical name, kept because the flag
+    // is serialised) so pre-toggle saves read as enabled.
+    bool IsAutoAssignNewWorkersEnabled();
 
-    // Opening gate: start every assigned worker's trip to this ride now, and
-    // - only while IsAutoAssignOnOpenEnabled() - top the crew up to the
-    // requirement from the unassigned pool (nearest first, ties to the lowest
-    // entity id, picked-up workers skipped; workers assigned to other rides
-    // are never stolen). Summoning assigned workers happens under both
-    // toggle states.
+    // Hire-time self-assignment, called by StaffHireNewAction for a fresh
+    // Worker while IsAutoAssignNewWorkersEnabled(): the worker takes the
+    // single worst-staffed post that still has a shortfall, in
+    // AutoAssignAll's selection order (shut stalls first, then lowest
+    // staffing fraction, then lowest ride id), over the hire-eligible set:
+    // rides that are open or testing, plus closed rides with a pending
+    // open request. A plain closed ride is NOT eligible - it would only
+    // soak the hire until somebody opens it. One hire is at most one
+    // assignment; with no eligible shortfall the worker simply spawns
+    // unassigned. Returns whether an assignment was made. Deterministic;
+    // draws no ScenarioRand.
+    bool AssignNewWorker(Staff& worker);
+
+    // Opening gate: start every assigned worker's trip to this ride now.
+    // Never assigns anyone, in either toggle state - hire-time is the only
+    // system assignment, everything after that is manual.
     void SummonWorkers(Ride& ride);
+
+    // True when this ride's operators are drawn standing at their post.
+    // Only coaster crews are visible in the station; every other class
+    // works out of sight (stall operators behind the counter, flat-ride
+    // and tracked non-coaster crews likewise). Facilities require no
+    // operators and never have anyone at post. This function is the one
+    // place the class test lives - the paint pass asks only this.
+    bool AreOperatorsVisibleAtPost(const Ride& ride);
 
     // True when the stall is shut because staffing is engaged and no operator is
     // at post. Facilities never require operators and are never shut by this.
@@ -102,5 +130,7 @@ namespace OpenRCT2::RideStaffing
     // (closed stalls before rides, then lowest staffing fraction, then lowest
     // ride id; the nearest unassigned worker wins each post). One-shot: workers
     // are never pulled off an existing assignment. Returns how many were assigned.
+    // Retained for StaffAutoAssignAction, which no UI invokes any more; the
+    // hire path shares the selection order through AssignNewWorker.
     int32_t AutoAssignAll();
 } // namespace OpenRCT2::RideStaffing

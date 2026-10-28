@@ -28,6 +28,7 @@
 #include <openrct2/core/String.hpp>
 #include <openrct2/drawing/ColourMap.h>
 #include <openrct2/drawing/Drawing.Screen.h>
+#include <openrct2/drawing/Drawing.String.h>
 #include <openrct2/drawing/Drawing.h>
 #include <openrct2/drawing/Rectangle.h>
 #include <openrct2/drawing/RenderTarget.h>
@@ -39,6 +40,7 @@
 #include <openrct2/interface/Viewport.h>
 #include <openrct2/interface/WidgetIndexGlobals.h>
 #include <openrct2/localisation/Formatter.h>
+#include <openrct2/localisation/Formatting.h>
 #include <openrct2/object/ObjectManager.h>
 #include <openrct2/object/PeepAnimationsObject.h>
 #include <openrct2/peep/PeepActionFormat.h>
@@ -303,6 +305,18 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_STAFF_LIST_MAP].right = width - 6;
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].left = width - 155;
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].right = width - 11;
+
+            // The auto-assign checkbox spans the strip left of the
+            // quick-fire group: its shipped 112 px left a 97 px text area
+            // that ellipsised the label ("Auto-assign new workers"), with
+            // the unassigned counter drawn hard against the cut. A checkbox
+            // label is ellipsised to its widget, so the widget itself has
+            // to span the free strip. The bottom lifts one pixel so the
+            // hit rect stays off the uniform-colour picker's top row -
+            // hit-testing takes the last matching widget, and the checkbox
+            // is the later one.
+            widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].right = width - 80;
+            widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].bottom = widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].top + 11;
         }
 
         void onDraw(RenderTarget& rt) override
@@ -344,13 +358,16 @@ namespace OpenRCT2::Ui::Windows
                 }
                 ft = Formatter();
                 ft.Add<int32_t>(unassigned);
-                // Right of the auto-assign toggle: the toggle's label and this
-                // counter used to be drawn on top of each other.
+                // On the bottom counter line, right-aligned: beside the
+                // toggle, this counter collided with the toggle's label at
+                // the shipped geometry. The line's only other text is the
+                // staff counter at the far left, and the offset is measured
+                // with the same string metrics the draw uses, so the two
+                // can only meet if they genuinely fill the window.
+                const auto counterText = FormatStringID(STR_WORKERS_UNASSIGNED, unassigned);
+                const auto counterX = width - 4 - getStringWidth(counterText, FontStyle::small);
                 drawText(
-                    rt,
-                    windowPos
-                        + ScreenCoordsXY{ widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].right + 9,
-                                          widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].top + 1 },
+                    rt, windowPos + ScreenCoordsXY{ counterX, widgets[WIDX_STAFF_LIST_LIST].bottom + 2 },
                     STR_WORKERS_UNASSIGNED, ft);
             }
         }

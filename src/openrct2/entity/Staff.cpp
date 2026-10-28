@@ -1590,7 +1590,7 @@ namespace OpenRCT2
         auto* assignedRide = GetRide(currentRide);
         if (assignedRide != nullptr && assignedRide->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
         {
-            auto* tileElement = MapGetFirstElementAt(TileCoordsXY{ x, y });
+            auto* tileElement = MapGetFirstElementAt(CoordsXY{ x, y });
             if (tileElement != nullptr)
             {
                 do
@@ -1679,13 +1679,19 @@ namespace OpenRCT2
     // from where stock staff pathfinding walks the worker away along the
     // path. The worker stays assigned throughout; only the at-post state
     // ends. Every failure path leaves the worker in a stock recovery
-    // (step-off or falling), never wedged in the egress subState.
+    // (step-off or falling), never wedged in the egress subState. An
+    // assignment change deferred by setWorkerAssignment is applied on
+    // every exit below (applyDeferredAssignment), so it lands exactly
+    // once whichever way the walk ends.
     void Staff::updateWorkerEgress(const Ride* ride)
     {
         if (ride == nullptr)
         {
             // The ride was demolished mid-egress: the same stock recovery
-            // as a worker caught at post by a demolition.
+            // as a worker caught at post by a demolition. A deferred
+            // assignment change still takes effect - its target is another
+            // ride, or none.
+            applyDeferredAssignment();
             setState(PeepState::falling);
             return;
         }
@@ -1695,8 +1701,11 @@ namespace OpenRCT2
         {
             // The walk out is a few dozen units at platform height; if
             // anything has gone wrong, complete the departure at once
-            // rather than wedge here.
+            // rather than wedge here. The deferral applies after the
+            // step-off: the step-off still reads the old ride's station
+            // height.
             workerStepOffToAdjacentPath();
+            applyDeferredAssignment();
             return;
         }
 
@@ -1734,11 +1743,15 @@ namespace OpenRCT2
             // The exit tile's path is gone (deleted under the exit):
             // complete the departure with the step-off instead.
             workerStepOffToAdjacentPath();
+            applyDeferredAssignment();
             return;
         }
 
         setState(PeepState::patrolling);
         subState = 0;
+        // A deferred assignment change takes effect now the walk is
+        // complete; the goal reset below then serves the new assignment.
+        applyDeferredAssignment();
         resetPathfindGoal();
         setDestination({ x, y }, 2);
     }
@@ -1762,7 +1775,7 @@ namespace OpenRCT2
             referenceZ = assignedRide->getStation(currentRideStation).getBaseZ();
         }
 
-        const auto currentTile = TileCoordsXY{ x, y };
+        const auto currentTile = TileCoordsXY{ CoordsXY{ x, y } };
         for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
         {
             const auto neighbour = TileCoordsXY(currentTile.toCoordsXY() + CoordsDirectionDelta[dir]);
@@ -1912,7 +1925,11 @@ namespace OpenRCT2
                 return;
             }
 
-            if (TileCoordsXY{ x, y } == postTile.value())
+            // (x, y are world coordinates: the TileCoordsXY must be built
+            // from a CoordsXY so it converts - building it from the raw
+            // pair stores world numbers as tile numbers and the test can
+            // never be true.)
+            if (TileCoordsXY{ CoordsXY{ x, y } } == postTile.value())
             {
                 // Face the stall across the counter and take post.
                 const auto shopTile = TileCoordsXY(ride->getStation().start);
@@ -2041,12 +2058,12 @@ namespace OpenRCT2
         invalidate();
     }
 
-    bool Staff::isAtStallPost() const
+    bool Staff::isHiddenAtPost() const
     {
         if (!isWorker() || state != PeepState::operating || currentRide.IsNull())
             return false;
         const auto* ride = GetRide(currentRide);
-        return ride != nullptr && ride->getRideTypeDescriptor().Classification == RideClassification::shopOrStall;
+        return ride != nullptr && !RideStaffing::AreOperatorsVisibleAtPost(*ride);
     }
 
     bool Staff::doWorkerPathFinding()
@@ -2184,7 +2201,15 @@ namespace OpenRCT2
     void Staff::setWorkerAssignment(RideId rideId)
     {
         if (currentRide == rideId)
+        {
+            // Reaffirming the current assignment also cancels a deferred move
+            // away from it: the latest instruction wins.
+            hasDeferredAssignment = false;
             return;
+        }
+
+        // A new instruction supersedes any deferred one still in flight.
+        hasDeferredAssignment = false;
 
         // Stepping down from a post needs the old ride's geometry, so leave before switching.
         if (state == PeepState::operating || state == PeepState::headingToInspection)
@@ -2195,10 +2220,42 @@ namespace OpenRCT2
                 setState(PeepState::falling);
         }
 
+        if (state == PeepState::headingToInspection && subState == kWorkerSubStateEgress)
+        {
+            // The leave began the walk out through the station exit. The
+            // egress handler needs currentRide - and the egress subState -
+            // intact for the whole walk, so the switch itself is deferred
+            // and applied where the walk ends (applyDeferredAssignment,
+            // called from updateWorkerEgress). Applying it here, as this
+            // function used to, overwrote the subState the leave had just
+            // set and dropped the worker where he stood.
+            deferredAssignment = rideId;
+            hasDeferredAssignment = true;
+            return;
+        }
+
         currentRide = rideId;
         currentRideStation = StationIndex::FromUnderlying(0);
         subState = 0;
         resetPathfindGoal();
+    }
+
+    // Applies an assignment change that setWorkerAssignment deferred while
+    // this worker was walking out of their old ride. Called from every exit
+    // of updateWorkerEgress, so a recorded change is applied exactly once,
+    // whichever way the walk ends. The pathfind goal is the caller's
+    // business: the completion exit resets it as part of resuming patrol,
+    // and the recovery exits hand the worker to stock recovery, which
+    // re-goals him when he is next dispatched.
+    void Staff::applyDeferredAssignment()
+    {
+        if (!hasDeferredAssignment)
+            return;
+
+        hasDeferredAssignment = false;
+        currentRide = deferredAssignment;
+        deferredAssignment = RideId::GetNull();
+        currentRideStation = StationIndex::FromUnderlying(0);
     }
 
     /** rct2: 0x00992A5C */

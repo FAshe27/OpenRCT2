@@ -43,6 +43,12 @@ namespace OpenRCT2::RideStaffing
         return 2;
     }
 
+    bool AreOperatorsVisibleAtPost(const Ride& ride)
+    {
+        const auto& rtd = ride.getRideTypeDescriptor();
+        return rtd.Classification == RideClassification::ride && rtd.Category == RideCategory::rollerCoaster;
+    }
+
     int32_t CountOperatorsAtPost(const Ride& ride)
     {
         int32_t count = 0;
@@ -105,7 +111,7 @@ namespace OpenRCT2::RideStaffing
         return IsEngaged();
     }
 
-    bool IsAutoAssignOnOpenEnabled()
+    bool IsAutoAssignNewWorkersEnabled()
     {
         // Stored inverted (bit set = disabled) so parks saved before the
         // toggle existed read as enabled.
@@ -215,11 +221,8 @@ namespace OpenRCT2::RideStaffing
         {
             return std::max(0, GetRequiredOperators(ride) - CountAssignedOperators(ride));
         }
-    } // namespace
 
-    int32_t AutoAssignAll()
-    {
-        struct Target
+        struct AssignmentTarget
         {
             RideId rideId;
             bool isStall;
@@ -227,14 +230,42 @@ namespace OpenRCT2::RideStaffing
             CoordsXY postLocation;
         };
 
-        int32_t assignedCount = 0;
-        while (true)
+        // Which rides system assignment may pick, per caller.
+        enum class AssignmentEligibility : uint8_t
         {
-            // Recompute targets each round: assignments change the fractions.
-            std::vector<Target> targets;
+            // AutoAssignAll: any ride that is not closed.
+            anyNonClosedRide,
+            // Hire-time self-assignment: rides actually running (open or
+            // testing) plus closed rides with a pending open request. A
+            // plain closed ride is excluded - it would only soak the hire
+            // until somebody opens it.
+            runningOrPending,
+        };
+
+        bool IsEligibleAssignmentTarget(const Ride& ride, AssignmentEligibility eligibility)
+        {
+            switch (eligibility)
+            {
+                case AssignmentEligibility::anyNonClosedRide:
+                    return ride.status != RideStatus::closed;
+                case AssignmentEligibility::runningOrPending:
+                    return ride.status == RideStatus::open || ride.status == RideStatus::testing
+                        || ride.pendingOpenStatus != RideStatus::closed;
+            }
+            return false;
+        }
+
+        // Every ride with an unfilled requirement that the caller's
+        // eligibility admits, worst first: shut stalls before rides, then
+        // lowest staffing fraction, then lowest ride id. This is the one
+        // selection order all system assignment shares (AutoAssignAll and
+        // the hire path) - stable, deterministic, no randomness anywhere.
+        std::vector<AssignmentTarget> CollectAssignmentTargets(AssignmentEligibility eligibility)
+        {
+            std::vector<AssignmentTarget> targets;
             for (auto& ride : RideManager(getGameState()))
             {
-                if (ride.status == RideStatus::closed)
+                if (!IsEligibleAssignmentTarget(ride, eligibility))
                     continue;
                 const auto staffing = GetStaffing(ride);
                 if (staffing.required <= 0 || OperatorShortfall(ride) <= 0)
@@ -243,18 +274,26 @@ namespace OpenRCT2::RideStaffing
                     { ride.id, ride.getRideTypeDescriptor().Classification == RideClassification::shopOrStall,
                       staffing.fraction(), GetPostLocation(ride) });
             }
-            if (targets.empty())
-                break;
-
-            // Worst first: shut stalls before rides, then lowest staffing fraction,
-            // then lowest ride id (stable, deterministic).
-            std::sort(targets.begin(), targets.end(), [](const Target& a, const Target& b) {
+            std::sort(targets.begin(), targets.end(), [](const AssignmentTarget& a, const AssignmentTarget& b) {
                 if (a.isStall != b.isStall)
                     return a.isStall > b.isStall;
                 if (a.fraction != b.fraction)
                     return a.fraction < b.fraction;
                 return a.rideId.ToUnderlying() < b.rideId.ToUnderlying();
             });
+            return targets;
+        }
+    } // namespace
+
+    int32_t AutoAssignAll()
+    {
+        int32_t assignedCount = 0;
+        while (true)
+        {
+            // Recompute targets each round: assignments change the fractions.
+            const auto targets = CollectAssignmentTargets(AssignmentEligibility::anyNonClosedRide);
+            if (targets.empty())
+                break;
             const auto& target = targets.front();
 
             // The nearest unassigned worker wins the post; ties go to the lowest entity id.
@@ -283,15 +322,35 @@ namespace OpenRCT2::RideStaffing
         return assignedCount;
     }
 
+    bool AssignNewWorker(Staff& worker)
+    {
+        if (!worker.isWorker() || !worker.currentRide.IsNull())
+            return false;
+
+        // One hire, at most one assignment: the single worst-staffed
+        // hire-eligible post. Dispatch is not started here - the staff
+        // think sends assigned workers to their posts, as for any manual
+        // assignment.
+        const auto targets = CollectAssignmentTargets(AssignmentEligibility::runningOrPending);
+        if (targets.empty())
+            return false;
+
+        worker.setWorkerAssignment(targets.front().rideId);
+        return true;
+    }
+
     void SummonWorkers(Ride& ride)
     {
         const int32_t required = GetRequiredOperators(ride);
         if (required <= 0)
             return;
 
-        // Assigned crew start their trip now, under both toggle states:
-        // summoning an assigned worker is their assignment taking effect,
-        // not auto-assign. (Crew already travelling or at post are left be.)
+        // Assigned crew start their trip now: summoning an assigned worker
+        // is their assignment taking effect, not auto-assign. Nobody is
+        // assigned here, in either toggle state - since the toggle's
+        // redefinition, hire-time (AssignNewWorker) is the only system
+        // assignment, and every assignment after that is manual. (Crew
+        // already travelling or at post are left be.)
         for (auto* staff : EntityList<Staff>())
         {
             if (staff->isWorker() && staff->currentRide == ride.id
@@ -299,42 +358,6 @@ namespace OpenRCT2::RideStaffing
             {
                 staff->workerBeginHeadingToPost();
             }
-        }
-
-        if (!IsAutoAssignOnOpenEnabled())
-            return;
-
-        // Top up from the unassigned pool with the AutoAssignAll selection
-        // rules, scoped to this one ride. The number to add is fixed up
-        // front from the assigned + en-route count, so the top-up is a
-        // no-op once the ride has its requirement and no pattern of repeat
-        // calls (the gate re-runs this on every open/test click while the
-        // ride waits) can ever push the ride past it.
-        const auto postLocation = GetPostLocation(ride);
-        const int32_t shortfall = OperatorShortfall(ride);
-        for (int32_t i = 0; i < shortfall; i++)
-        {
-            Staff* bestWorker = nullptr;
-            int64_t bestDistance = 0;
-            for (auto* staff : EntityList<Staff>())
-            {
-                if (!staff->isWorker() || !staff->currentRide.IsNull())
-                    continue;
-                if (staff->state == PeepState::picked)
-                    continue;
-                const int64_t distance = DistanceSquared({ staff->x, staff->y }, postLocation);
-                if (bestWorker == nullptr || distance < bestDistance
-                    || (distance == bestDistance && staff->id.ToUnderlying() < bestWorker->id.ToUnderlying()))
-                {
-                    bestWorker = staff;
-                    bestDistance = distance;
-                }
-            }
-            if (bestWorker == nullptr)
-                break;
-
-            bestWorker->setWorkerAssignment(ride.id);
-            bestWorker->workerBeginHeadingToPost();
         }
     }
 } // namespace OpenRCT2::RideStaffing

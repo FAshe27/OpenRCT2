@@ -23,13 +23,17 @@ void PaintStaff(PaintSession& session, const Staff& staff, int32_t orientation)
 {
     PROFILED_FUNCTION();
 
-    // Workers: a stall operator at post works behind the counter and is not
-    // drawn (they would otherwise stand frozen on the frontage path tile).
-    // Visibility is derived from state at paint time and never stored: the
-    // peep stays fully simulated, and leaving the post for any reason draws
-    // them again at the frontage tile. Skipping the paint also removes them
-    // from in-world picking, which reads the same paint pass.
-    if (staff.isAtStallPost())
+    // Workers: an operator at post on any ride class but a coaster works
+    // out of sight and is not drawn (a stall operator behind the counter;
+    // flat-ride and tracked non-coaster crews likewise) - they would
+    // otherwise stand frozen at the post. Only coaster crews stand
+    // visibly in the station. Which classes hide is RideStaffing's call
+    // (AreOperatorsVisibleAtPost); visibility is derived from state at
+    // paint time and never stored: the peep stays fully simulated, and
+    // leaving the post for any reason draws them again. Skipping the
+    // paint also removes them from in-world picking, which reads the
+    // same paint pass.
+    if (staff.isHiddenAtPost())
     {
         return;
     }

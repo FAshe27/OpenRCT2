@@ -3889,5 +3889,5 @@ STR_7095    :Assign the nearest unassigned worker to this ride
 STR_7096    :Workers
 STR_7097    :No unassigned workers are available
 STR_7098    :Opening - waiting for staff ({COMMA16}/{COMMA16})
-STR_7099    :Auto-assign on open
-STR_7100    :When opening a ride or stall, automatically assign unassigned workers to fill its crew
+STR_7099    :Auto-assign new workers
+STR_7100    :New workers assign themselves to the ride or stall most in need of crew when hired

@@ -51,6 +51,17 @@ namespace OpenRCT2
         uint8_t staffOrders;
         uint8_t staffMowingTimeout;
 
+        // Workers: an assignment change requested while this worker is
+        // walking out of their old ride through its exit (setWorkerAssignment)
+        // is deferred until the walk completes - the egress handler needs the
+        // old assignment intact for the whole walk. Runtime-only, like
+        // Ride::pendingOpenStatus: deliberately absent from serialise(), so a
+        // save made mid-egress loads with no deferral pending and the worker
+        // simply stays assigned to the old ride (the close-path semantics).
+        // deferredAssignment may itself be null (an unassign defers too).
+        RideId deferredAssignment;
+        bool hasDeferredAssignment = false;
+
         union // 1st statistic
         {
             uint32_t staffLawnsMown;
@@ -92,7 +103,7 @@ namespace OpenRCT2
 
         void setWorkerAssignment(RideId rideId);
         bool workerBeginHeadingToPost();
-        bool isAtStallPost() const;
+        bool isHiddenAtPost() const;
 
         void clearPatrolArea();
         void setPatrolArea(const CoordsXY& coords, bool value);
@@ -127,6 +138,7 @@ namespace OpenRCT2
         void updateWorkerHeadingToPost();
         void updateOperating();
         void workerLeavePost();
+        void applyDeferredAssignment();
         bool workerBeginEgress(const Ride& ride);
         void updateWorkerEgress(const Ride* ride);
         void workerStepOffToAdjacentPath();

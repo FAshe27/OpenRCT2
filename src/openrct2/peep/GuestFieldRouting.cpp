@@ -67,6 +67,17 @@ namespace OpenRCT2::PathFinding
         uint32_t _fieldBuildTick = 0xFFFFFFFF;
         uint32_t _fieldBuildsThisTick = 0;
 
+        // The lane-change latch (ruling E1): the tick of each guest's most
+        // recent lane change, keyed by peepId, so a guest crosses at most
+        // once per cooldown however the triggers read. Runtime-only, like
+        // the field cache above: never serialised, cleared with the fields
+        // (ClearGuestFields), and rebuilt from behaviour alone. A record
+        // binds only while younger than the cooldown; older records are
+        // dead and are swept when the map grows past its cap, so the cap
+        // only bounds memory.
+        std::unordered_map<uint32_t, uint32_t> _laneChangeLastTick;
+        constexpr size_t kMaxLaneChangeRecords = 4096;
+
         // Node identity: a path element is identified by its tile and its
         // base height, so stacked path elements on one tile (different z)
         // are distinct nodes. Tile coordinates are below 1024 and base
@@ -805,50 +816,74 @@ namespace OpenRCT2::PathFinding
         // may substitute a sideways step for a straight one when the tile
         // ahead is blocked or clearly more crowded than the tile beside.
         // It is a behavioural response to present-tense congestion, not a
-        // routing change: it keeps no memory, allocates nothing, draws no
-        // ScenarioRand, and for field-routed guests it admits only
+        // routing change: it draws no ScenarioRand, and its only memory is
+        // the runtime latch record of each guest's last crossing (below),
+        // which is never serialised. For field-routed guests it admits only
         // equal-distance steps, so the field's strict-decrease arrival
         // proof survives (see the termination argument at gate 7 below).
 
-        // Cooldown windows are this many ticks wide (about four tile-steps
-        // at the pace spread's 1.7-2.3 units/tick). At most one lane change
-        // per guest per window is possible by construction: the window
-        // index is the gate input, so within a window the answer is
-        // constant, and between any two crossings a guest makes several
-        // ordinary steps.
-        constexpr uint32_t kLaneChangeWindowTicks = 64;
+        // A guest crosses at most once per this many ticks (about four
+        // tile-steps at the pace spread's 1.7-2.3 units/tick), enforced by
+        // the latch record (_laneChangeLastTick): a true per-guest
+        // cooldown measured from the guest's own last crossing. The
+        // shipped build instead gated on a stateless hash of (peepId,
+        // window index): nothing recorded a crossing, so a guest could
+        // cross several times inside one open window - the serpentining
+        // of the fix-round2 playtest - and a window boundary could bunch
+        // two crossings a tick apart. The hash is gone; the latch is the
+        // only cadence mechanism.
+        constexpr uint32_t kLaneChangeCooldownTicks = 64;
 
         // Occupancy counting stops after this many entities examined per
         // tile bucket: a tile holding more than that is "crowded" for
         // every trigger purpose long before the cap matters.
         constexpr int32_t kLaneChangeMaxExamined = 24;
 
-        // Whether this guest's cooldown window is open: a pure hash of
-        // (peepId, window index) in the lane hash's own arithmetic style
-        // (Knuth multiplicative + fold) - the determinism pattern the pace
-        // block uses for (peepId, currentTicks). Roughly half of all
-        // windows are open; the guest cannot influence either input.
-        bool LaneChangeWindowOpen(uint32_t peepId, uint32_t windowIndex)
+        bool LaneChangeOnCooldown(uint32_t peepId, uint32_t now)
         {
-            uint32_t hash = peepId * 2654435761u;
-            hash ^= (windowIndex + 1u) * 2246822519u;
-            hash ^= hash >> 16;
-            return (hash & 1u) != 0;
+            const auto it = _laneChangeLastTick.find(peepId);
+            return it != _laneChangeLastTick.end() && now - it->second < kLaneChangeCooldownTicks;
+        }
+
+        void RecordLaneChange(uint32_t peepId, uint32_t now)
+        {
+            _laneChangeLastTick[peepId] = now;
+            if (_laneChangeLastTick.size() > kMaxLaneChangeRecords)
+            {
+                // Sweep the dead records (too old to bind anyone). Live
+                // records are bounded by how many guests can cross inside
+                // one cooldown; if a sweep frees nothing, the map simply
+                // rides above the cap until records age out.
+                for (auto it = _laneChangeLastTick.begin(); it != _laneChangeLastTick.end();)
+                {
+                    if (now - it->second >= kLaneChangeCooldownTicks)
+                    {
+                        it = _laneChangeLastTick.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
         }
 
         // Present-tense occupancy of one path tile, read from the entity
         // spatial index: how many guests stand on it, and whether any of
-        // them blocks the guest asking - stopped (any non-walking state:
-        // a watcher at the path edge, a bench sitter, a guest paused
-        // mid-errand) or slower, by the shared pace numerator, which makes
-        // "slower" an arithmetic comparison rather than a measurement.
+        // them is stopped (any non-walking state: a watcher at the path
+        // edge, a bench sitter, a guest paused mid-errand). "Slower" is
+        // deliberately not read here (ruling E3): the pace numerator is a
+        // per-guest constant in a continuous spread, so under the shipped
+        // rule roughly half the park counted as a blocker to any given
+        // guest and the BLOCKER trigger was hot in any real crowd. A crowd
+        // ahead is judged from the guest count instead (the trigger).
         struct LaneChangeOccupancy
         {
             int32_t guests = 0;
-            bool hasBlocker = false;
+            bool hasStoppedBlocker = false;
         };
 
-        LaneChangeOccupancy LaneChangeTileOccupancy(const TileCoordsXYZ& tile, const Peep& self, int32_t selfPace)
+        LaneChangeOccupancy LaneChangeTileOccupancy(const TileCoordsXYZ& tile, const Peep& self)
         {
             LaneChangeOccupancy occupancy;
             const auto& bucket = getGameState().entities.getEntityTileList(tile.toCoordsXY().toTileCentre());
@@ -865,9 +900,9 @@ namespace OpenRCT2::PathFinding
                     continue;
                 }
                 occupancy.guests++;
-                if (other->state != PeepState::walking || other->getGuestPaceNumerator() < selfPace)
+                if (other->state != PeepState::walking)
                 {
-                    occupancy.hasBlocker = true;
+                    occupancy.hasStoppedBlocker = true;
                 }
             }
             return occupancy;
@@ -883,6 +918,7 @@ namespace OpenRCT2::PathFinding
     void ClearGuestFields()
     {
         _fields.clear();
+        _laneChangeLastTick.clear();
         _fieldsGeneration++;
     }
 
@@ -1037,10 +1073,11 @@ namespace OpenRCT2::PathFinding
             return direction;
         }
 
-        // Gate 3 - cooldown window (the determinism gate; see
-        // LaneChangeWindowOpen above).
-        const uint32_t windowIndex = getGameState().currentTicks / kLaneChangeWindowTicks;
-        if (!LaneChangeWindowOpen(peep.peepId, windowIndex))
+        // Gate 3 - cooldown (the latch; see LaneChangeOnCooldown above): a
+        // guest who crossed within the cooldown cannot cross again,
+        // however the triggers read from the new column.
+        const uint32_t now = getGameState().currentTicks;
+        if (LaneChangeOnCooldown(peep.peepId, now))
         {
             return direction;
         }
@@ -1101,12 +1138,13 @@ namespace OpenRCT2::PathFinding
         // (mirroring GuestFieldTryStep's distance-0 hand-over: the last
         // steps of a route belong to the stock code). Termination: field
         // consultations strictly decrease the distance; a crossing
-        // preserves it but is bounded - at most one per cooldown window,
-        // the trigger must re-fire from the freer column (an immediate
-        // reverse crossing needs the crowd asymmetry to have physically
-        // inverted), and the equal-distance level set at any tile is at
-        // most the corridor's width - so route length stays within
-        // dist + one crossing per window of route tiles. A guest whose
+        // preserves it but is bounded - at most one per 64-tick cooldown,
+        // enforced by the latch (gate 3), the trigger must re-fire from
+        // the freer column (an immediate reverse crossing needs the crowd
+        // asymmetry to have physically inverted), and the equal-distance
+        // level set at any tile is at most the corridor's width - so route
+        // length stays within dist + one crossing per cooldown of route
+        // tiles. A guest whose
         // goal has no usable field (unbuilt, over budget, off the routed
         // graph) is treated as a stock-search guest: gates 5's doorstep
         // rule is their protection, and a one-tile detour is corrected by
@@ -1127,8 +1165,7 @@ namespace OpenRCT2::PathFinding
         }
 
         // The ahead tile's occupancy is shared by both lateral tests.
-        const int32_t selfPace = peep.getGuestPaceNumerator();
-        const LaneChangeOccupancy ahead = LaneChangeTileOccupancy(aheadNode, peep, selfPace);
+        const LaneChangeOccupancy ahead = LaneChangeTileOccupancy(aheadNode, peep);
 
         // Gates 6 and 8, per lateral: the movement graph's own step test
         // (slope arrival heights, ghost elements skipped, queue nodes
@@ -1167,12 +1204,14 @@ namespace OpenRCT2::PathFinding
                 }
             }
 
-            const LaneChangeOccupancy side = LaneChangeTileOccupancy(sideNode, peep, selfPace);
-            // BLOCKER: someone stopped or slower ahead, and the side tile
-            // is strictly freer. CROWD: a bunch ahead (at least 3) and the
-            // side tile clearer by at least 2 - the gap requirement stops
-            // sideways shuffling between near-equal crowds.
-            const bool fires = (ahead.hasBlocker && side.guests < ahead.guests)
+            const LaneChangeOccupancy side = LaneChangeTileOccupancy(sideNode, peep);
+            // BLOCKER (cooled, ruling E3): someone stopped ahead, or a jam
+            // of at least 2 ahead - and the side tile is strictly freer.
+            // Merely slower traffic ahead no longer fires it. CROWD: a
+            // bunch ahead (at least 3) and the side tile clearer by at
+            // least 2 - the gap requirement stops sideways shuffling
+            // between near-equal crowds.
+            const bool fires = ((ahead.hasStoppedBlocker || ahead.guests >= 2) && side.guests < ahead.guests)
                 || (ahead.guests >= 3 && ahead.guests - side.guests >= 2);
             if (!fires)
             {
@@ -1203,6 +1242,10 @@ namespace OpenRCT2::PathFinding
             }
         }
 
+        if (found)
+        {
+            RecordLaneChange(peep.peepId, now);
+        }
         return found ? bestDirection : direction;
     }
 
