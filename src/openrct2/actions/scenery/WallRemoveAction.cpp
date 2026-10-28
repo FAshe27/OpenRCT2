@@ -14,7 +14,6 @@
 #include "../../OpenRCT2.h"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../world/Location.hpp"
 #include "../../world/Map.h"
 #include "../../world/TileElementsView.h"
@@ -88,8 +87,6 @@ namespace OpenRCT2::GameActions
         wallElement->removeBannerEntry();
         MapInvalidateTileZoom1({ _loc, wallElement->getBaseZ(), (wallElement->getBaseZ()) + 72 });
         TileElementRemove(wallElement);
-        // Walls/fences on path edges feed plaza door legality.
-        Plaza::InvalidatePlazaRegions();
 
         return res;
     }

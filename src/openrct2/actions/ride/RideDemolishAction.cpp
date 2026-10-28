@@ -17,7 +17,6 @@
 #include "../../drawing/ScrollingText.h"
 #include "../../entity/EntityList.h"
 #include "../../management/NewsItem.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../peep/RideUseSystem.h"
 #include "../../ride/Ride.h"
 #include "../../ride/RideData.h"
@@ -156,9 +155,6 @@ namespace OpenRCT2::GameActions
         }
 
         ride.remove();
-        // Demolition removes the ride's entrances, which are plaza door
-        // landings in the region cache.
-        Plaza::InvalidatePlazaRegions();
         park.value = Park::CalculateParkValue(park, gameState);
 
         // Close windows related to the demolished ride

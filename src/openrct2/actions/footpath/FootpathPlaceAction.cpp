@@ -18,7 +18,6 @@
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
 #include "../../object/PathAdditionEntry.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../ride/RideConstruction.h"
 #include "../../windows/Intent.h"
 #include "../../world/ConstructionClearance.h"
@@ -518,7 +517,6 @@ namespace OpenRCT2::GameActions
             FootpathConnectEdges(_loc, reinterpret_cast<TileElement*>(pathElement), GetFlags());
 
         FootpathUpdateQueueChains();
-        Plaza::InvalidatePlazaRegions();
         MapInvalidateTileFull(_loc);
     }
 

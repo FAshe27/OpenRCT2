@@ -15,7 +15,6 @@
 #include "../../core/Guard.hpp"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../ride/RideConstruction.h"
 #include "../../world/ConstructionClearance.h"
 #include "../../world/Footpath.h"
@@ -110,8 +109,6 @@ namespace OpenRCT2::GameActions
         }
 
         gFootpathGroundFlags = 0;
-
-        Plaza::InvalidatePlazaRegions();
 
         // Force ride construction to recheck area
         _currentTrackSelectionFlags.set(TrackSelectionFlag::recheck);

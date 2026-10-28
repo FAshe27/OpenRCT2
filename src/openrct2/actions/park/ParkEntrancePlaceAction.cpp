@@ -15,7 +15,6 @@
 #include "../../core/Guard.hpp"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../world/ConstructionClearance.h"
 #include "../../world/Entrance.h"
 #include "../../world/Footpath.h"
@@ -199,8 +198,6 @@ namespace OpenRCT2::GameActions
             }
         }
 
-        // The entrance tile is a plaza door landing in the region cache.
-        Plaza::InvalidatePlazaRegions();
         return res;
     }
 

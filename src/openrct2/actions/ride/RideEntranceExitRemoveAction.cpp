@@ -10,7 +10,6 @@
 #include "RideEntranceExitRemoveAction.h"
 
 #include "../../Diagnostic.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../ride/Ride.h"
 #include "../../world/Entrance.h"
 #include "../../world/Map.h"
@@ -122,7 +121,6 @@ namespace OpenRCT2::GameActions
         const bool isGhost = GetFlags().has(CommandFlag::ghost);
         if (!isGhost)
         {
-            Plaza::InvalidatePlazaRegions();
             RideClearForConstruction(*ride);
             ride->removePeeps();
             InvalidateTestResults(*ride);

@@ -12,7 +12,6 @@
 #include "../Diagnostic.h"
 #include "../GameState.h"
 #include "../core/Guard.hpp"
-#include "../entity/EntityList.h"
 #include "../entity/Guest.h"
 #include "../entity/Staff.h"
 #include "../object/PathAdditionEntry.h"
@@ -28,12 +27,9 @@
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
-#include "PlazaRegions.h"
 
-#include <algorithm>
 #include <cassert>
 #include <cstring>
-#include <vector>
 
 namespace OpenRCT2::PathFinding
 {
@@ -323,225 +319,6 @@ namespace OpenRCT2::PathFinding
         return false;
     }
 
-    // ----- Passing (personal fork, following v2) - BEGIN -----
-    // Defect A of the big build's following ("accidental congaline"): a
-    // faster guest who caught a slower one crawled behind it forever,
-    // because following (in Peep.cpp) only ever shortens steps and v1
-    // deliberately did no overtaking. Passing belongs in lane choice: when
-    // a walking guest is held up by a slower guest ahead, PeepMoveOneTile
-    // adopts a temporary passing lane - one separation (8 units) to the
-    // side of the blocker, walker's left preferred - for this step's
-    // destination. There is no passing state anywhere: the deviation is
-    // re-derived from current positions on every step. While the blocker
-    // sits inside the alongside window (forward -4..12) the deviation
-    // re-derives identically, so the guest keeps its passing lane across
-    // the ~2 tile steps a pass takes (the walker moves along the dominant
-    // axis, so the lateral gap closes in staircases); once the blocker is
-    // more than 4 behind, the guest's own stable lane resumes untouched.
-    // Gates mirror the following gates in Peep.cpp: guests only, walking
-    // state only, straight steps only (the caller checks the step direction
-    // is unchanged), neither party on a queue tile, the blocker genuinely
-    // slower (personal pace numerators) and genuinely same-direction (aim
-    // vectors agree with the step). The furniture clamp in PeepMoveOneTile
-    // still runs on the final lane afterwards.
-    static constexpr int32_t kGuestPassingSeparation = 8;
-    static constexpr int32_t kGuestPassingLaneBound = 8;
-    static constexpr int32_t kGuestPassingHeldUpLateral = 6;
-    static constexpr int32_t kGuestPassingLookBehind = 4;
-    static constexpr int32_t kGuestPassingLookAhead = 14;
-    static constexpr int32_t kGuestPassingBlockerAhead = 12;
-    static constexpr int32_t kGuestPassingSlotHalfWidth = 4;
-    static constexpr int32_t kGuestPassingNearbyCap = 32;
-    // Same vertical tolerance as kGuestFollowMaxZDiff in Peep.cpp.
-    static constexpr int32_t kGuestPassingMaxZDiff = 16;
-
-    // Mirror of the pace-numerator derivation in Peep::updateWalkingAction
-    // (Peep.cpp): a guest's personal pace as a step numerator over 20
-    // ticks. Duplicated here - exactly as the lane derivation is already
-    // duplicated between PeepMoveOneTile and the plaza door-landing shift -
-    // because the original is a local computation inside a member function.
-    // Pure peepId hash: no save field, no ScenarioRand.
-    static int32_t GuestPassingPaceNumerator(uint32_t peepId)
-    {
-        constexpr int32_t kGuestPaceNumeratorMin = 34; // 1.70 units/tick = 0.85x stock
-        constexpr int32_t kGuestPaceNumeratorSpan = 13;
-        const uint32_t paceHash = peepId * 2654435761u;
-        const uint32_t paceFolded = paceHash ^ (paceHash >> 16);
-        return kGuestPaceNumeratorMin + static_cast<int32_t>(paceFolded % kGuestPaceNumeratorSpan);
-    }
-
-    // True when the peep's current stepping tile is a queue tile (the same
-    // test as GuestFollowingOnQueueTile in Peep.cpp). Passing never engages
-    // in queue context, for either party: queue spacing is stock behaviour.
-    static bool GuestPassingOnQueueTile(const Peep& peep)
-    {
-        const auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ peep.nextLoc });
-        return pathElement != nullptr && pathElement->isQueue();
-    }
-
-    // Decides a passing lane for a guest taking a straight step in
-    // direction. On success returns true and sets outLane to the signed
-    // lane (same space as the lane in PeepMoveOneTile: added to Y on
-    // X-travel, to X on Y-travel, relative to the centre line of the tile
-    // the guest is standing on - consecutive tiles on a straight share that
-    // centre line, so the lane carries onto the destination tile).
-    //
-    // A blocker qualifies in two geometries, both re-derived from current
-    // positions on every step, so the manoeuvre needs no state:
-    //  - approach: the blocker is within kGuestPassingHeldUpLateral of the
-    //    guest's own line, ahead or just alongside. The guest adopts the
-    //    passing lane beside it, walker's left first.
-    //  - alongside: the guest is already sitting one separation to the
-    //    blocker's side (the passing lane it adopted earlier) with the
-    //    blocker still in the forward window. The approach window alone
-    //    would drop the blocker here - the guest is 8 units from it, not
-    //    6 - and the guest's own lane would resume mid-pass, pulling it
-    //    back into the congaline. Recognising the alongside geometry
-    //    keeps the passing lane until the blocker falls behind.
-    static bool GuestPassingLane(const Peep& peep, Direction direction, int32_t& outLane)
-    {
-        if (!peep.is<Guest>() || peep.state != PeepState::walking)
-            return false;
-        if (GuestPassingOnQueueTile(peep))
-            return false;
-
-        const int32_t unitX = CoordsDirectionDelta[direction].x / kCoordsXYStep;
-        const int32_t unitY = CoordsDirectionDelta[direction].y / kCoordsXYStep;
-        const bool xTravel = (unitX != 0);
-        const CoordsXY selfTileCentre = CoordsXY{ peep.nextLoc }.toTileCentre();
-        const int32_t selfLaneCoord = xTravel ? (peep.y - selfTileCentre.y) : (peep.x - selfTileCentre.x);
-        const int32_t myNumerator = GuestPassingPaceNumerator(peep.peepId);
-
-        struct GuestPassingNearby
-        {
-            int32_t forward;
-            int32_t laneCoord;
-        };
-        GuestPassingNearby nearby[kGuestPassingNearbyCap];
-        int32_t nearbyCount = 0;
-        bool hasBlocker = false;
-        int32_t blockerForward = 0;
-        int32_t blockerLaneCoord = 0;
-        bool hasAlongside = false;
-        int32_t alongsideForward = 0;
-        int32_t alongsideLaneCoord = 0;
-
-        auto slotOccupied = [&](int32_t target) {
-            for (int32_t i = 0; i < nearbyCount; i++)
-            {
-                if (nearby[i].forward >= -kGuestPassingLookBehind && nearby[i].forward <= kGuestPassingLookAhead
-                    && std::abs(nearby[i].laneCoord - target) <= kGuestPassingSlotHalfWidth)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        const CoordsXY probeTiles[2] = {
-            { peep.x, peep.y },
-            { peep.x + unitX * kCoordsXYStep, peep.y + unitY * kCoordsXYStep },
-        };
-        for (const auto& probeTile : probeTiles)
-        {
-            for (auto* other : EntityTileList<Guest>(probeTile))
-            {
-                if (other == &peep)
-                    continue;
-                if (other->state != PeepState::walking || !other->isActionWalking())
-                    continue;
-                if (std::abs(other->z - peep.z) > kGuestPassingMaxZDiff)
-                    continue;
-                if (GuestPassingOnQueueTile(*other))
-                    continue;
-
-                const int32_t dx = other->x - peep.x;
-                const int32_t dy = other->y - peep.y;
-                const int32_t forward = dx * unitX + dy * unitY;
-                if (forward < -kGuestPassingLookBehind || forward > kGuestPassingLookAhead)
-                    continue;
-                const int32_t laneCoord = xTravel ? (other->y - selfTileCentre.y) : (other->x - selfTileCentre.x);
-                if (nearbyCount < kGuestPassingNearbyCap)
-                {
-                    nearby[nearbyCount] = { forward, laneCoord };
-                    nearbyCount++;
-                }
-
-                // Blocker candidacy: ahead or alongside, genuinely slower,
-                // genuinely heading the same way as this step.
-                if (forward > kGuestPassingBlockerAhead)
-                    continue;
-                const auto otherDestination = other->getDestination();
-                const int32_t aimDot = (otherDestination.x - other->x) * unitX + (otherDestination.y - other->y) * unitY;
-                if (aimDot <= 0)
-                    continue;
-                if (GuestPassingPaceNumerator(other->peepId) >= myNumerator)
-                    continue;
-
-                const int32_t laneDiff = laneCoord - selfLaneCoord;
-                if (std::abs(laneDiff) <= kGuestPassingHeldUpLateral)
-                {
-                    if (!hasBlocker || forward < blockerForward)
-                    {
-                        hasBlocker = true;
-                        blockerForward = forward;
-                        blockerLaneCoord = laneCoord;
-                    }
-                }
-                else if (std::abs(std::abs(laneDiff) - kGuestPassingSeparation) <= 3)
-                {
-                    if (!hasAlongside || forward < alongsideForward)
-                    {
-                        hasAlongside = true;
-                        alongsideForward = forward;
-                        alongsideLaneCoord = laneCoord;
-                    }
-                }
-            }
-        }
-
-        if (hasBlocker)
-        {
-            // Side choice, walker's left first. A positive lane leans
-            // towards direction 1 (+Y) on X-travel and direction 2 (+X) on
-            // Y-travel (see the furniture comment in PeepMoveOneTile), so
-            // in lane coordinates the walker's left hand is +lane when
-            // heading 0 (-X) or 1 (+Y), and -lane when heading 2 (+X) or
-            // 3 (-Y).
-            const int32_t leftSign = (direction == 0 || direction == 1) ? 1 : -1;
-            for (const int32_t sideSign : { leftSign, -leftSign })
-            {
-                const int32_t target = blockerLaneCoord + sideSign * kGuestPassingSeparation;
-                if (target < -8 || target > 8)
-                    continue;
-                if (!slotOccupied(target))
-                {
-                    outLane = target;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        if (hasAlongside)
-        {
-            // Stay on the side the guest is already passing on; the target
-            // is the alongside blocker's own passing lane, clamped to the
-            // lane bound (the guest may have adopted it while the blocker
-            // stood nearer the edge).
-            const int32_t sideSign = (selfLaneCoord >= alongsideLaneCoord) ? 1 : -1;
-            const int32_t target = std::clamp(
-                alongsideLaneCoord + sideSign * kGuestPassingSeparation, -kGuestPassingLaneBound, kGuestPassingLaneBound);
-            if (!slotOccupied(target))
-            {
-                outLane = target;
-                return true;
-            }
-        }
-        return false;
-    }
-    // ----- Passing - END -----
-
     /**
      *
      *  rct2: 0x0069524E
@@ -557,7 +334,6 @@ namespace OpenRCT2::PathFinding
             return GuestSurfacePathFinding(peep);
         }
 
-        const Direction previousDirection = peep.peepDirection;
         peep.peepDirection = direction;
         if (peep.state != PeepState::queuing)
         {
@@ -627,23 +403,6 @@ namespace OpenRCT2::PathFinding
             const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
             int32_t lane = (direction == 2 || direction == 3) ? laneRight : -laneRight;
 
-            // Passing (following v2, defect A): on a straight step - this
-            // step's direction is the same as the previous step's - a guest
-            // held up by a slower guest ahead adopts a temporary passing
-            // lane instead of its own (see GuestPassingLane above). The
-            // furniture clamp below still applies to the final lane, and
-            // the guest's own lane resumes by itself once the blocker has
-            // been passed: the deviation is re-derived from positions on
-            // every step and never stored anywhere.
-            if (direction == previousDirection)
-            {
-                int32_t passingLane = 0;
-                if (GuestPassingLane(peep, direction, passingLane))
-                {
-                    lane = passingLane;
-                }
-            }
-
             if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
             {
                 // The peep's lane sits on one side of the centre line. The sideways axis is Y
@@ -686,12 +445,26 @@ namespace OpenRCT2::PathFinding
             // The cut composes with the lane above: with |lane| <= 8, |offset| <= 4
             // and a cut of 4, the destination stays inside the entered tile with at
             // least 4 units of margin on every side (proven exhaustively in the
-            // crowd harness). If either inside edge carries a path addition, the
-            // cut is skipped for this step rather than pushing the peep towards
-            // furniture the lane clamp was protecting them from - in practice
-            // additions are only drawn on unconnected edges, so this is a safety
-            // net for inconsistent tiles. Queues are untouched: like the lane, this
-            // sits inside the not-queuing block.
+            // crowd harness). Queues are untouched: like the lane, this sits inside
+            // the not-queuing block.
+            //
+            // Fence-aware cut (personal fork): the cut pulls the peep towards the
+            // inside corner of the turn - the tile corner where the entered tile,
+            // the tile behind it, the tile ahead and the diagonal tile meet - so
+            // the additions that can stand in the cut's way are drawn on the two
+            // boundary lines forming that corner, and those live on the NEIGHBOUR
+            // tiles. A path addition is only ever drawn on an UNCONNECTED edge of
+            // its own tile (see GuestSpreadPathAdditionOnEdge), and the entered
+            // tile's two inside edges are its entry and exit edges, which are
+            // connected by construction - an addition can never be drawn on them,
+            // so testing the entered tile for them can never fire. (The original
+            // crowd-pack version of this check did exactly that, and peeps cut
+            // straight through fences standing on the inside of a bend.) If any
+            // inside-corner edge of the three neighbour tiles carries an addition,
+            // the cut is skipped for this step and the peep walks the full corner,
+            // stock-style. The test reuses the lane clamp's helper unchanged: same
+            // paint-derived edge semantics, same jumping-fountain and ghost
+            // exemptions.
             constexpr int32_t kGuestSpreadCornerCut = 4;
             Direction forcedExit = direction;
             if (GuestSpreadForcedExitDirection(newTile, peep, direction, forcedExit) && forcedExit != direction
@@ -701,12 +474,25 @@ namespace OpenRCT2::PathFinding
                 const auto exitDelta = CoordsDirectionDelta[forcedExit];
                 const int32_t cutX = ((exitDelta.x - entryDelta.x) / kCoordsXYStep) * kGuestSpreadCornerCut;
                 const int32_t cutY = ((exitDelta.y - entryDelta.y) / kCoordsXYStep) * kGuestSpreadCornerCut;
-                if ((cutX != 0 || cutY != 0)
-                    && !GuestSpreadPathAdditionOnEdge(newTile, peep, direction, DirectionReverse(direction))
-                    && !GuestSpreadPathAdditionOnEdge(newTile, peep, direction, forcedExit))
+                if (cutX != 0 || cutY != 0)
                 {
-                    newTile.x += cutX;
-                    newTile.y += cutY;
+                    // Centres of the three tiles that share the inside corner
+                    // with the entered tile: behind (entry), ahead (exit) and
+                    // diagonal. The entered tile's own centre is the same
+                    // expression that produced newTile above.
+                    const CoordsXY cornerCentre = CoordsXY{ CoordsXY{ peep.nextLoc } + entryDelta }.toTileCentre();
+                    const CoordsXY entryCentre = cornerCentre - entryDelta;
+                    const CoordsXY exitCentre = cornerCentre + exitDelta;
+                    const CoordsXY diagCentre = entryCentre + exitDelta;
+                    const bool insideFenced = GuestSpreadPathAdditionOnEdge(entryCentre, peep, direction, forcedExit)
+                        || GuestSpreadPathAdditionOnEdge(exitCentre, peep, forcedExit, DirectionReverse(direction))
+                        || GuestSpreadPathAdditionOnEdge(diagCentre, peep, forcedExit, direction)
+                        || GuestSpreadPathAdditionOnEdge(diagCentre, peep, forcedExit, DirectionReverse(forcedExit));
+                    if (!insideFenced)
+                    {
+                        newTile.x += cutX;
+                        newTile.y += cutY;
+                    }
                 }
             }
         }
@@ -2337,751 +2123,6 @@ namespace OpenRCT2::PathFinding
         return StationIndex::FromUnderlying(0);
     }
     /**
-     * V2 plaza walking (personal fork): the ride goal tile computation,
-     * hoisted out of CalculateNextDestination so the stock path and the
-     * plaza steering below share exactly one copy (pure code motion - the
-     * statements are the ones that used to run inline in
-     * CalculateNextDestination, in the same order). Returns false when the
-     * peep is not heading for an open ride (the caller then treats the
-     * peep as aimless, exactly as the stock code did).
-     */
-    static bool GuestGetRideGoalTile(Guest& peep, TileCoordsXYZ& outGoal)
-    {
-        RideId rideIndex = peep.guestHeadingToRideId;
-        auto ride = GetRide(rideIndex);
-        if (ride == nullptr || ride->status != RideStatus::open)
-        {
-            return false;
-        }
-
-        TileCoordsXYZ loc{};
-
-        /* Find the ride's closest entrance station to the peep.
-         * At the same time, count how many entrance stations there are and
-         * which stations are entrance stations. */
-        auto bestScore = std::numeric_limits<int32_t>::max();
-        StationIndex closestStationNum = StationIndex::FromUnderlying(0);
-
-        int32_t numEntranceStations = 0;
-        BitSet<Limits::kMaxStationsPerRide> entranceStations = {};
-
-        for (const auto& station : ride->getStations())
-        {
-            // Skip if stationNum has no entrance (so presumably an exit only station)
-            if (station.entrance.isNull())
-                continue;
-
-            const auto stationIndex = ride->getStationIndex(&station);
-
-            numEntranceStations++;
-            entranceStations[stationIndex.ToUnderlying()] = true;
-
-            TileCoordsXYZD entranceLocation = station.entrance;
-            auto score = CalculateHeuristicPathingScore(entranceLocation, TileCoordsXYZ{ peep.nextLoc });
-            if (score < bestScore)
-            {
-                bestScore = score;
-                closestStationNum = stationIndex;
-            }
-        }
-
-        // Ride has no stations with an entrance, so head to station 0.
-        if (numEntranceStations == 0)
-            closestStationNum = StationIndex::FromUnderlying(0);
-
-        if (numEntranceStations > 1 && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS))
-        {
-            closestStationNum = GuestPathfindingSelectRandomStation(peep, numEntranceStations, entranceStations);
-        }
-
-        if (numEntranceStations == 0)
-        {
-            // closestStationNum is always 0 here.
-            const auto& closestStation = ride->getStation(closestStationNum);
-            auto entranceXY = TileCoordsXY(closestStation.start);
-            loc.x = entranceXY.x;
-            loc.y = entranceXY.y;
-            loc.z = closestStation.height;
-        }
-        else
-        {
-            TileCoordsXYZD entranceXYZD = ride->getStation(closestStationNum).entrance;
-            loc.x = entranceXYZD.x;
-            loc.y = entranceXYZD.y;
-            loc.z = entranceXYZD.z;
-        }
-
-        GetRideQueueEnd(loc);
-
-        outGoal = loc;
-        return true;
-    }
-
-    /**
-     * Handoff fix (personal fork, DIAGNOSIS item 4): the tile a guest
-     * must step FROM to join the queue whose tail tile is `tail`. The
-     * stock queue-join test (Peep tile-entry handler) accepts the join
-     * only when the queue tile's banner direction is the reverse of the
-     * guest's step direction, so the banner direction names the approach
-     * side exactly: the approach tile is the tail's neighbour in the
-     * banner direction. Returns false - leaving the caller to steer at
-     * the tail itself, as before - when the tail is not a bannered queue
-     * tile or the approach tile does not hold a non-queue path element
-     * connected back toward the tail.
-     */
-    static bool GuestGetQueueApproachTile(const TileCoordsXYZ& tail, TileCoordsXYZ& outApproach)
-    {
-        const auto* tailPath = MapGetPathElementAt(tail);
-        if (tailPath == nullptr || !tailPath->isQueue() || !tailPath->hasQueueBanner())
-            return false;
-
-        const Direction bannerDirection = tailPath->getQueueBannerDirection();
-        TileCoordsXYZ approach = tail;
-        approach.x += TileDirectionDelta[bannerDirection].x;
-        approach.y += TileDirectionDelta[bannerDirection].y;
-
-        const auto* approachPath = MapGetPathElementAt(approach);
-        if (approachPath == nullptr || approachPath->isQueue())
-            return false;
-        if (!(approachPath->getEdges() & (1 << DirectionReverse(bannerDirection))))
-            return false;
-
-        outApproach = approach;
-        return true;
-    }
-
-    /**
-     * V2 plaza walking (personal fork): scores one door of a plaza region
-     * by running the stock heuristic search outward from the door's landing
-     * tile toward the goal - the same metric ChooseDirection minimises
-     * (best endScore, then fewest endSteps). The search is run once per
-     * permitted edge of the landing tile except the edge back into the
-     * plaza, with the tile budget divided across doors and edges so the
-     * worst case stays comparable to one stock ChooseDirection call.
-     * Returns false when the search reaches no scored end from this door.
-     */
-    static bool PlazaScoreDoor(
-        Guest& peep, const Plaza::Region& region, const PlazaGrid::Door& door, const TileCoordsXYZ& goal, RideId queueRideIndex,
-        int32_t tileBudget, uint16_t& outScore, uint8_t& outSteps)
-    {
-        const TileCoordsXYZ landing{ door.landing.x, door.landing.y, region.baseZ };
-
-        // The landing tile's path element, validated exactly the way the
-        // region cache validated the door.
-        TileElement* landingElement = nullptr;
-        TileElement* tileElement = MapGetFirstElementAt(TileCoordsXY{ door.landing.x, door.landing.y });
-        if (tileElement == nullptr)
-            return false;
-        do
-        {
-            if (tileElement->isGhost())
-                continue;
-            if (tileElement->getType() != TileElementType::path)
-                continue;
-            if (FootpathIsZAndDirectionValid(*tileElement->asPath(), region.baseZ, static_cast<Direction>(door.direction)))
-            {
-                landingElement = tileElement;
-                break;
-            }
-        } while (!(tileElement++)->isLastForTile());
-        if (landingElement == nullptr)
-            return false;
-
-        // Because this is called for guests only, never ignore banners.
-        uint32_t edges = static_cast<uint32_t>(PathGetPermittedEdges(false, landingElement->asPath())) & 0x0F;
-        edges &= ~(1u << DirectionReverse(static_cast<Direction>(door.direction)));
-        const int32_t numEdges = std::popcount(edges);
-        if (numEdges == 0)
-            return false;
-
-        bool scored = false;
-        uint16_t bestScore = 0xFFFF;
-        uint8_t bestSteps = 0xFF;
-
-        int32_t testEdge = Numerics::bitScanForward(edges);
-        for (; testEdge != -1; testEdge = Numerics::bitScanForward(edges))
-        {
-            edges &= ~(1u << testEdge);
-
-            PathFindingState state{};
-            state.ignoreForeignQueues = true;
-            state.queueRideIndex = queueRideIndex;
-            state.maxJunctions = PeepPathfindGetMaxNumberJunctions(peep);
-            state.countTilesChecked = std::max(1, tileBudget / numEdges);
-            state.junctionCount = state.maxJunctions;
-            for (auto& entry : state.history)
-            {
-                entry.location.setNull();
-                entry.direction = kInvalidDirection;
-            }
-            state.history[0].location = landing;
-            state.history[0].direction = 0xF;
-
-            int32_t height = landing.z;
-            if (landingElement->asPath()->isSloped()
-                && landingElement->asPath()->getSlopeDirection() == static_cast<Direction>(testEdge))
-            {
-                height += 2;
-            }
-
-            uint16_t score = 0xFFFF;
-            TileCoordsXYZ endXYZ{};
-            uint8_t endSteps = 255;
-            uint8_t endJunctions = 0;
-            TileCoordsXYZ endJunctionList[16];
-            uint8_t endDirectionList[16] = { 0 };
-
-            PeepPathfindHeuristicSearch(
-                state, { landing.x, landing.y, height }, goal, peep, landingElement, false, 0, &score,
-                static_cast<Direction>(testEdge), &endJunctions, endJunctionList, endDirectionList, &endXYZ, &endSteps);
-
-            if (score != 0xFFFF && (score < bestScore || (score == bestScore && endSteps < bestSteps)))
-            {
-                bestScore = score;
-                bestSteps = endSteps;
-                scored = true;
-            }
-        }
-
-        if (!scored)
-            return false;
-        outScore = bestScore;
-        outSteps = bestSteps;
-        return true;
-    }
-
-    // Passing inside plazas (following v2, defect A): the plaza equivalent
-    // of GuestPassingLane. Plaza steering aims the walker at a far
-    // destination with a free vector, so a held-up guest is passed around
-    // by shifting this steering destination sideways: the destination's
-    // lateral offset from the anchor becomes one separation (8 units) to
-    // the side of the blocker, walker's left preferred, with the shift
-    // capped at kGuestPlazaPassMaxShift per steering call - across a
-    // crossing the steering hook runs at every pathfinding decision, so
-    // the offset is progressive and the pass completes over successive
-    // calls, each one re-derived from current positions (no state). The
-    // shifted destination is only accepted when the walker's staircase
-    // from the anchor to it provably stays inside the region
-    // (Plaza::SteerSegmentStaysInRegion, with the door-landing tile as the
-    // allowed extra for final hops); when neither side validates, the
-    // original destination is kept and following alone governs the guest.
-    // Gates mirror the path version: walking guests only, neither party on
-    // a queue tile, the blocker genuinely slower and heading the same
-    // general way (aim vectors agree with the steering vector).
-    static constexpr int32_t kGuestPlazaPassMaxShift = 12;
-    static constexpr int32_t kGuestPlazaPassNearbyCap = 32;
-
-    static void GuestPlazaPassingOffset(
-        Guest& peep, const Plaza::Region& region, const CoordsXY& anchor, const TileCoordsXYZ& target, bool targetIsDoorLanding,
-        CoordsXY& destination)
-    {
-        const int32_t travelX = destination.x - anchor.x;
-        const int32_t travelY = destination.y - anchor.y;
-        if (std::abs(travelX) + std::abs(travelY) < 8)
-            return;
-
-        const int32_t unitX = (std::abs(travelX) >= std::abs(travelY)) ? ((travelX >= 0) ? 1 : -1) : 0;
-        const int32_t unitY = (unitX != 0) ? 0 : ((travelY >= 0) ? 1 : -1);
-        // The walker's left-hand vector for this travel direction: for
-        // +X travel it is -Y, for +Y travel +X, and reversed for the
-        // opposite headings.
-        const int32_t leftX = unitY;
-        const int32_t leftY = -unitX;
-        const int32_t travelForward = travelX * unitX + travelY * unitY;
-        const int32_t destinationLateral = travelX * leftX + travelY * leftY;
-        const int32_t myNumerator = GuestPassingPaceNumerator(peep.peepId);
-
-        struct GuestPlazaPassNearby
-        {
-            int32_t forward;
-            int32_t lateral;
-        };
-        GuestPlazaPassNearby nearby[kGuestPlazaPassNearbyCap];
-        int32_t nearbyCount = 0;
-        bool hasBlocker = false;
-        int32_t blockerForward = 0;
-        int32_t blockerLateral = 0;
-
-        const CoordsXY probeTiles[2] = {
-            { anchor.x, anchor.y },
-            { anchor.x + unitX * kCoordsXYStep, anchor.y + unitY * kCoordsXYStep },
-        };
-        for (const auto& probeTile : probeTiles)
-        {
-            for (auto* other : EntityTileList<Guest>(probeTile))
-            {
-                if (other == &peep)
-                    continue;
-                if (other->state != PeepState::walking || !other->isActionWalking())
-                    continue;
-                if (std::abs(other->z - peep.z) > kGuestPassingMaxZDiff)
-                    continue;
-                if (GuestPassingOnQueueTile(*other))
-                    continue;
-
-                const int32_t relX = other->x - anchor.x;
-                const int32_t relY = other->y - anchor.y;
-                const int32_t forward = relX * unitX + relY * unitY;
-                if (forward < -kGuestPassingLookBehind || forward > kGuestPassingLookAhead)
-                    continue;
-                const int32_t lateral = relX * leftX + relY * leftY;
-                if (nearbyCount < kGuestPlazaPassNearbyCap)
-                {
-                    nearby[nearbyCount] = { forward, lateral };
-                    nearbyCount++;
-                }
-
-                // Blocker candidacy: ahead or alongside, laterally near
-                // the steering line at that forward distance (the line
-                // runs from the anchor to the destination, so its lateral
-                // at the blocker is interpolated), slower, same way.
-                if (forward > kGuestPassingBlockerAhead)
-                    continue;
-                const int32_t lineLateral = (travelForward > 0) ? (destinationLateral * forward / travelForward)
-                                                                : destinationLateral;
-                if (std::abs(lateral - lineLateral) > kGuestPassingHeldUpLateral)
-                    continue;
-                const auto otherDestination = other->getDestination();
-                const int32_t aimDot = (otherDestination.x - other->x) * travelX + (otherDestination.y - other->y) * travelY;
-                if (aimDot <= 0)
-                    continue;
-                if (GuestPassingPaceNumerator(other->peepId) >= myNumerator)
-                    continue;
-                if (!hasBlocker || forward < blockerForward)
-                {
-                    hasBlocker = true;
-                    blockerForward = forward;
-                    blockerLateral = lateral;
-                }
-            }
-        }
-        if (!hasBlocker)
-            return;
-
-        const PlazaGrid::Tile extraAllowed = targetIsDoorLanding ? PlazaGrid::Tile{ target.x, target.y }
-                                                                 : PlazaGrid::Tile{ -1, -1 };
-        for (const int32_t sideSign : { 1, -1 })
-        {
-            const int32_t wantedLateral = blockerLateral + sideSign * kGuestPassingSeparation;
-            const int32_t shift = std::clamp(
-                wantedLateral - destinationLateral, -kGuestPlazaPassMaxShift, kGuestPlazaPassMaxShift);
-            if (shift == 0)
-                continue;
-            bool occupied = false;
-            for (int32_t i = 0; i < nearbyCount; i++)
-            {
-                if (nearby[i].forward >= -kGuestPassingLookBehind && nearby[i].forward <= kGuestPassingLookAhead
-                    && std::abs(nearby[i].lateral - wantedLateral) <= kGuestPassingSlotHalfWidth)
-                {
-                    occupied = true;
-                    break;
-                }
-            }
-            if (occupied)
-                continue;
-            const CoordsXY shifted = { destination.x + leftX * shift, destination.y + leftY * shift };
-            if (Plaza::SteerSegmentStaysInRegion(region, anchor, shifted, extraAllowed))
-            {
-                destination = shifted;
-                return;
-            }
-        }
-    }
-
-    /**
-     * V2 plaza walking (personal fork): if the peep is standing on a plaza
-     * region tile, replace the next one-tile step with a far steering
-     * destination (the string-pulled waypoint toward the chosen door, or
-     * toward the goal itself when the goal is inside the region) and
-     * return true. Returns false - leaving stock behaviour bit-for-bit in
-     * charge - whenever any precondition does not hold. See the v2 design:
-     * single hook in CalculateNextDestination, doors scored with the stock
-     * search, movement inside the region is BFS + string-pulling whose
-     * every staircase step is simulated to stay on region tiles (never a
-     * pure beeline: a step onto a non-path tile triggers the snap-back in
-     * Peep::performNextAction and a lost-guest loop).
-     *
-     * No new peep state, no save fields, and no ScenarioRand draws at
-     * all: the aimless door pick documented at the bottom (M3) is a
-     * deterministic hash of synced game state, not a draw.
-     *
-     * Handoff fix (personal fork, DIAGNOSIS items 1-4): the steering
-     * watch beside the region cache (PlazaRegions.h) guards the three
-     * handoff points where a steering decision and a stock transition
-     * can disagree - door landings (re-capture guard + progress
-     * watchdog), the park entrance threshold and the queue tail (both
-     * are aimed at their approach tile so stock makes the final,
-     * direction-keyed step). Still no peep state, no save fields and no
-     * ScenarioRand draws: the watch is steering-system state, cleared
-     * with the region cache it sits beside.
-     */
-    static bool PlazaTrySteer(Guest& peep)
-    {
-        if (peep.state != PeepState::walking || peep.outsideOfPark)
-            return false;
-
-        const TileCoordsXYZ current{ peep.nextLoc };
-        const uint16_t regionId = Plaza::GetRegionIdAt(current);
-
-        // Handoff fix (DIAGNOSIS item 1): feed the steering watch's
-        // delivery observation even when this call finds the peep off
-        // the region - being seen outside the region they were steered
-        // out of is what arms the re-capture guard below.
-        Plaza::ObservePlazaSteerGuest(peep.peepId, regionId, getGameState().currentTicks);
-
-        if (regionId == 0)
-            return false;
-
-        const Plaza::Region* regionPtr = Plaza::FindRegion(regionId);
-        if (regionPtr == nullptr || !regionPtr->steerable())
-            return false;
-        const Plaza::Region& region = *regionPtr;
-
-        // Self-healing revalidation (design section 2.3): never trust a
-        // stale cache entry.
-        if (!Plaza::RevalidateRegionTile(current, regionId))
-            return false;
-
-        // Determine the goal, reusing the stock computations.
-        bool haveGoal = false;
-        bool aimless = false;
-        TileCoordsXYZ goal{};
-        RideId queueRideIndex = RideId::GetNull();
-
-        if (peep.peepFlags.has(PeepFlag::leavingPark))
-        {
-            if (peep.peepFlags.has(PeepFlag::parkEntranceChosen))
-            {
-                goal = TileCoordsXYZ{ peep.pathfindGoal };
-                haveGoal = true;
-            }
-            else
-            {
-                const auto chosenEntrance = GetNearestParkEntrance(peep.nextLoc);
-                if (!chosenEntrance.has_value())
-                    return false;
-                goal = TileCoordsXYZ(chosenEntrance.value());
-                haveGoal = true;
-            }
-        }
-        else if (!peep.guestHeadingToRideId.IsNull())
-        {
-            if (!GuestGetRideGoalTile(peep, goal))
-                return false; // closed / missing ride: stock treats as aimless below; decline here.
-            queueRideIndex = peep.guestHeadingToRideId;
-            haveGoal = true;
-        }
-        else
-        {
-            aimless = true;
-        }
-
-        // Handoff fix (DIAGNOSIS items 3-4): the tile steering actually
-        // aims at. For two goals the stock transition at the goal tile
-        // keys on the guest's step direction, which a free steering
-        // vector cannot guarantee - so steering aims at the APPROACH
-        // tile instead and stock makes the final step:
-        // - a leaver's park entrance: the tile the entrance faces (the
-        //   guest then crosses onto the entrance tile in the entrance's
-        //   reverse facing direction - the only outward crossing the
-        //   entrance tile-entry handler accepts without a snap-back);
-        // - a ride's queue tail: the tile on the queue banner's side of
-        //   the tail (see GuestGetQueueApproachTile).
-        // When the peep already stands on the approach tile, the
-        // goal-in-region branch below declines (steerGoal == current),
-        // handing the final step to stock. The true goal is kept for
-        // the watch/guard bookkeeping and for excluding the goal tile
-        // itself as a door landing during scoring - a landing on the
-        // entrance or queue tile would recreate the free-vector arrival
-        // this substitution exists to avoid.
-        TileCoordsXYZ steerGoal = goal;
-        if (haveGoal && peep.peepFlags.has(PeepFlag::leavingPark))
-        {
-            const auto* entranceElement = MapGetParkEntranceElementAt(goal.toCoordsXYZ(), false);
-            if (entranceElement != nullptr)
-            {
-                const Direction facing = entranceElement->getDirection();
-                steerGoal = { goal.x + TileDirectionDelta[facing].x, goal.y + TileDirectionDelta[facing].y, goal.z };
-            }
-        }
-        else if (haveGoal && !peep.guestHeadingToRideId.IsNull())
-        {
-            TileCoordsXYZ approach{};
-            if (GuestGetQueueApproachTile(goal, approach))
-                steerGoal = approach;
-        }
-
-        if (haveGoal)
-        {
-            const uint32_t tick = getGameState().currentTicks;
-
-            // Handoff fix (DIAGNOSIS item 2): while the progress
-            // watchdog's cooldown runs, steering stays off this guest
-            // entirely - stock is re-planning them.
-            if (Plaza::PlazaSteerCoolingDown(peep.peepId, tick))
-                return false;
-
-            // Handoff fix (DIAGNOSIS item 2): account this steering
-            // decision. A guest whose decisions buy no net progress is
-            // looping, so burn the plan the way a pickup does in game
-            // (playtest E2) and let stock start over with a reset goal.
-            if (Plaza::NotePlazaSteerDecision(peep.peepId, regionId, current, goal, tick))
-            {
-                peep.resetPathfindGoal();
-                return false;
-            }
-
-            // Handoff fix (DIAGNOSIS item 1): a guest stock just walked
-            // back into the region they were steered out of, heading for
-            // the same outside goal, is in the door handoff loop -
-            // decline, so stock keeps uncontested control of the onward
-            // route from the landing.
-            if (Plaza::PlazaSteerGuardDeclines(peep.peepId, regionId, current, goal, tick))
-                return false;
-        }
-
-        const CoordsXY anchor = peep.getLocation();
-
-        // The peep's stable lane, derived exactly as in PeepMoveOneTile
-        // (kept duplicated there): the region lateral spread inside
-        // ComputeSteerDestination uses it to place this peep's own line
-        // through the region, and the M4 door-landing shift below uses it
-        // for the final approach point.
-        const uint32_t laneHash = peep.peepId * 2654435761u;
-        const int32_t laneMagnitude = static_cast<int32_t>((laneHash ^ (laneHash >> 13)) % 17) - 8;
-        const bool laneKeepsRight = ((laneHash >> 8) & 3) != 1;
-        const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
-
-        // Issues the steering destination computed by the region cache and
-        // applies the v1.1 lane idea to the final approach point of a door
-        // crossing (M4): when the destination is the centre of a door's
-        // landing tile, shift it sideways by the peep's stable lane (+/-8,
-        // furniture-clamped to +/-5) exactly as PeepMoveOneTile does, so
-        // guests pour out of a plaza spread across the exit tile instead of
-        // single file. Queue landings keep the exact centre: queue joins
-        // are positional. The shift is applied only when the staircase to
-        // the shifted point is still contained in the region (see
-        // Plaza::SteerSegmentStaysInRegion): the unshifted point was the
-        // validated one, and from an anchor across the region the shifted
-        // staircase could otherwise cut the corner of the tile diagonally
-        // beside the landing.
-        auto steerTo = [&](const TileCoordsXYZ& target, bool targetIsDoorLanding) -> bool {
-            CoordsXY destination{};
-            TileCoordsXYZ destinationTile{};
-            if (!Plaza::ComputeSteerDestination(
-                    region, anchor, current, target, targetIsDoorLanding, laneRight, destination, destinationTile))
-                return false;
-
-            if (targetIsDoorLanding && destinationTile == target)
-            {
-                for (const auto& door : region.doors)
-                {
-                    if (door.landing.x != target.x || door.landing.y != target.y)
-                        continue;
-                    const Direction crossing = static_cast<Direction>(door.direction);
-                    const auto* landingPath = MapGetPathElementAt(target);
-                    if (landingPath == nullptr || landingPath->isQueue())
-                        break;
-
-                    constexpr int32_t kGuestSpreadFurnitureLaneMax = 5;
-                    // laneRight was derived once for this steering call
-                    // (see above); here it is converted with the door
-                    // crossing direction in the role of the travel
-                    // direction, exactly as PeepMoveOneTile converts it.
-                    int32_t lane = (crossing == 2 || crossing == 3) ? laneRight : -laneRight;
-                    if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
-                    {
-                        const Direction plusSide = (crossing == 0 || crossing == 2) ? 1 : 2;
-                        const Direction laneSide = (lane > 0) ? plusSide : DirectionReverse(plusSide);
-                        if (GuestSpreadPathAdditionOnEdge(destination, peep, crossing, laneSide))
-                        {
-                            lane = std::clamp(lane, -kGuestSpreadFurnitureLaneMax, kGuestSpreadFurnitureLaneMax);
-                        }
-                    }
-                    const CoordsXY unshifted = destination;
-                    if (crossing == 0 || crossing == 2)
-                        destination.y += lane;
-                    else
-                        destination.x += lane;
-                    if (!Plaza::SteerSegmentStaysInRegion(region, anchor, destination, PlazaGrid::Tile{ target.x, target.y }))
-                        destination = unshifted;
-                    break;
-                }
-            }
-
-            // Passing (following v2, defect A): shift the steering
-            // destination sideways around a slower guest ahead, validated
-            // to stay inside the region; see GuestPlazaPassingOffset.
-            GuestPlazaPassingOffset(peep, region, anchor, target, targetIsDoorLanding, destination);
-
-            // Handoff fix (DIAGNOSIS item 1): when this issue delivers a
-            // goal-directed guest onto a door landing (the issued
-            // destination IS the landing tile, not an intermediate
-            // waypoint toward it), record the exit, so the re-capture
-            // guard can protect the guest/region/goal pairing if stock
-            // walks them straight back in.
-            if (targetIsDoorLanding && haveGoal && destinationTile == target)
-            {
-                Plaza::NotePlazaSteerExit(peep.peepId, regionId, goal, { target.x, target.y });
-            }
-
-            // Face along the dominant axis of travel, like the walker does.
-            const int32_t dx = destination.x - anchor.x;
-            const int32_t dy = destination.y - anchor.y;
-            if (std::abs(dy) > std::abs(dx))
-                peep.peepDirection = (dy >= 0) ? 1 : 3;
-            else
-                peep.peepDirection = (dx >= 0) ? 2 : 0;
-
-            peep.setDestination(destination, 2);
-            return true;
-        };
-
-        if (haveGoal)
-        {
-            // Steer goal inside this same region: no door, steer at it
-            // directly (M3 for ride goals fronting the plaza; with the
-            // items 3-4 approach substitution this is the approach tile
-            // of an entrance or queue tail fronting the plaza).
-            if (Plaza::GetRegionIdAt(steerGoal) == regionId)
-            {
-                if (steerGoal == current)
-                    return false; // already there; stock arrival logic owns this
-                return steerTo(steerGoal, false);
-            }
-
-            if (region.doors.empty())
-                return false;
-
-            // A door whose landing IS the steer goal tile wins outright
-            // (the search never scores its own starting tile).
-            for (const auto& door : region.doors)
-            {
-                if (door.landing.x == steerGoal.x && door.landing.y == steerGoal.y && region.baseZ == steerGoal.z)
-                {
-                    return steerTo({ door.landing.x, door.landing.y, region.baseZ }, true);
-                }
-            }
-
-            // Score doors with the stock search, nearest first by the
-            // game's own heuristic, capped (design section 1.3).
-            std::vector<const PlazaGrid::Door*> ordered;
-            ordered.reserve(region.doors.size());
-            for (const auto& door : region.doors)
-                ordered.push_back(&door);
-            std::stable_sort(ordered.begin(), ordered.end(), [&](const PlazaGrid::Door* a, const PlazaGrid::Door* b) {
-                return PlazaGrid::HeuristicScoreTiles(
-                           { a->landing.x, a->landing.y }, { steerGoal.x, steerGoal.y }, region.baseZ, steerGoal.z)
-                    < PlazaGrid::HeuristicScoreTiles(
-                           { b->landing.x, b->landing.y }, { steerGoal.x, steerGoal.y }, region.baseZ, steerGoal.z);
-            });
-            if (ordered.size() > Plaza::kPlazaMaxScoredDoors)
-                ordered.resize(Plaza::kPlazaMaxScoredDoors);
-
-            const int32_t perDoorBudget = 15000 / std::max<int32_t>(1, static_cast<int32_t>(ordered.size()));
-
-            const PlazaGrid::Door* bestDoor = nullptr;
-            uint16_t bestScore = 0xFFFF;
-            uint8_t bestSteps = 0xFF;
-            for (const auto* door : ordered)
-            {
-                // Handoff fix (items 3-4): when an approach tile is being
-                // aimed at, the true goal tile itself is never a scoring
-                // candidate - landing there is the free-vector arrival
-                // the approach substitution exists to avoid.
-                if (steerGoal != goal && door->landing.x == goal.x && door->landing.y == goal.y)
-                    continue;
-                uint16_t score = 0xFFFF;
-                uint8_t steps = 0xFF;
-                if (!PlazaScoreDoor(peep, region, *door, steerGoal, queueRideIndex, perDoorBudget, score, steps))
-                    continue;
-                if (score < bestScore || (score == bestScore && steps < bestSteps))
-                {
-                    bestScore = score;
-                    bestSteps = steps;
-                    bestDoor = door;
-                }
-            }
-            if (bestDoor == nullptr)
-                return false;
-
-            return steerTo({ bestDoor->landing.x, bestDoor->landing.y, region.baseZ }, true);
-        }
-
-        // Aimless guests (M3): door-to-door wandering. The chosen door's
-        // landing tile is remembered in peep.pathfindGoal - an existing,
-        // serialised field - exactly the way ChooseDirection stores the
-        // goal it is steering toward ({ goal, 0 }); when the peep later
-        // heads for a ride, ChooseDirection sees a different goal and
-        // resets its history as usual. While the remembered door is still
-        // a door of the current region it is simply reused; a new door is
-        // picked with the deterministic hash below - NOT a ScenarioRand
-        // draw - so the fork's RNG stream stays bit-identical to
-        // stock + v1.1 (flag resolution, 2026-10-27).
-        if (aimless)
-        {
-            if (region.doors.empty())
-                return false;
-
-            // Handoff fix (DIAGNOSIS item 3): the park entrance tile is
-            // a legal door landing, but a wanderer vectored onto it can
-            // only snap back or leave the park - the entrance door is
-            // never an aimless pick (goal-directed leavers above still
-            // use it, via its approach tile).
-            std::vector<const PlazaGrid::Door*> pickable;
-            pickable.reserve(region.doors.size());
-            for (const auto& door : region.doors)
-            {
-                if (MapGetParkEntranceElementAt(
-                        TileCoordsXYZ{ door.landing.x, door.landing.y, region.baseZ }.toCoordsXYZ(), false)
-                    == nullptr)
-                {
-                    pickable.push_back(&door);
-                }
-            }
-            if (pickable.empty())
-                return false;
-
-            const PlazaGrid::Door* chosen = nullptr;
-            const TileCoordsXYZ remembered{ peep.pathfindGoal };
-            if (!remembered.isNull() && remembered.z == region.baseZ)
-            {
-                for (const auto* door : pickable)
-                {
-                    if (door->landing.x == remembered.x && door->landing.y == remembered.y)
-                    {
-                        chosen = door;
-                        break;
-                    }
-                }
-            }
-            if (chosen == nullptr)
-            {
-                // Deterministic hash pick: a pure function of the peep's
-                // id, the tile it is deciding from, the region it is in
-                // and the current tick - all synced game state, identical
-                // on every client - so no ScenarioRand draw is spent and
-                // nothing is stored anywhere (the chosen door itself is
-                // remembered in peep.pathfindGoal, as before). The tick
-                // and tile terms keep successive picks by the same guest
-                // from hard-locking onto one door. Same Knuth-multiply +
-                // xor-shift fold as the lane derivation above.
-                const uint32_t doorHash = peep.peepId * 2654435761u ^ static_cast<uint32_t>(current.x) * 2246822519u
-                    ^ static_cast<uint32_t>(current.y) * 3266489917u
-                    ^ (static_cast<uint32_t>(regionId) + getGameState().currentTicks) * 668265263u;
-                const uint32_t doorMix = doorHash ^ (doorHash >> 16);
-                const uint32_t pick = doorMix % static_cast<uint32_t>(pickable.size());
-                chosen = pickable[pick];
-                peep.pathfindGoal = { TileCoordsXYZ{ chosen->landing.x, chosen->landing.y, region.baseZ }, 0 };
-            }
-
-            return steerTo({ chosen->landing.x, chosen->landing.y, region.baseZ }, true);
-        }
-
-        return false;
-    }
-
-    /**
      *
      *  rct2: 0x00694C35
      */
@@ -3108,17 +2149,6 @@ namespace OpenRCT2::PathFinding
         if (edges == 0)
         {
             return GuestSurfacePathFinding(peep);
-        }
-
-        // V2 plaza walking (personal fork): if the peep is standing on a
-        // plaza region tile, steer across the region instead of taking a
-        // one-tile step (see PlazaTrySteer). This hook sits immediately
-        // after the pathElement / edges checks and before the stock
-        // wide-edge cull, per the v2 design section 1.3; when it declines,
-        // stock behaviour continues unchanged below.
-        if (PlazaTrySteer(peep))
-        {
-            return 0;
         }
 
         if (!peep.outsideOfPark && peep.headingForRideOrParkExit())
@@ -3253,16 +2283,72 @@ namespace OpenRCT2::PathFinding
             return GuestPathfindAimless(peep, edges);
         }
 
-        // Peep is heading for a ride. (The goal computation itself lives
-        // in GuestGetRideGoalTile - hoisted verbatim for the plaza
-        // steering hook; pure code motion, no behaviour change.)
+        // Peep is heading for a ride.
         RideId rideIndex = peep.guestHeadingToRideId;
-        if (!GuestGetRideGoalTile(peep, loc))
+        auto ride = GetRide(rideIndex);
+        if (ride == nullptr || ride->status != RideStatus::open)
         {
             LogPathfinding(&peep, "Completed CalculateNextDestination - peep is heading to closed ride == aimless.");
 
             return GuestPathfindAimless(peep, edges);
         }
+
+        /* Find the ride's closest entrance station to the peep.
+         * At the same time, count how many entrance stations there are and
+         * which stations are entrance stations. */
+        auto bestScore = std::numeric_limits<int32_t>::max();
+        StationIndex closestStationNum = StationIndex::FromUnderlying(0);
+
+        int32_t numEntranceStations = 0;
+        BitSet<Limits::kMaxStationsPerRide> entranceStations = {};
+
+        for (const auto& station : ride->getStations())
+        {
+            // Skip if stationNum has no entrance (so presumably an exit only station)
+            if (station.entrance.isNull())
+                continue;
+
+            const auto stationIndex = ride->getStationIndex(&station);
+
+            numEntranceStations++;
+            entranceStations[stationIndex.ToUnderlying()] = true;
+
+            TileCoordsXYZD entranceLocation = station.entrance;
+            auto score = CalculateHeuristicPathingScore(entranceLocation, TileCoordsXYZ{ peep.nextLoc });
+            if (score < bestScore)
+            {
+                bestScore = score;
+                closestStationNum = stationIndex;
+            }
+        }
+
+        // Ride has no stations with an entrance, so head to station 0.
+        if (numEntranceStations == 0)
+            closestStationNum = StationIndex::FromUnderlying(0);
+
+        if (numEntranceStations > 1 && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS))
+        {
+            closestStationNum = GuestPathfindingSelectRandomStation(peep, numEntranceStations, entranceStations);
+        }
+
+        if (numEntranceStations == 0)
+        {
+            // closestStationNum is always 0 here.
+            const auto& closestStation = ride->getStation(closestStationNum);
+            auto entranceXY = TileCoordsXY(closestStation.start);
+            loc.x = entranceXY.x;
+            loc.y = entranceXY.y;
+            loc.z = closestStation.height;
+        }
+        else
+        {
+            TileCoordsXYZD entranceXYZD = ride->getStation(closestStationNum).entrance;
+            loc.x = entranceXYZD.x;
+            loc.y = entranceXYZD.y;
+            loc.z = entranceXYZD.z;
+        }
+
+        GetRideQueueEnd(loc);
 
         direction = ChooseDirection(TileCoordsXYZ{ peep.nextLoc }, loc, peep, true, rideIndex);
 

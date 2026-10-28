@@ -13,7 +13,6 @@
 #include "../../management/Finance.h"
 #include "../../object/BannerSceneryEntry.h"
 #include "../../object/ObjectEntryManager.h"
-#include "../../peep/PlazaRegions.h"
 #include "../../world/Banner.h"
 #include "../../world/Map.h"
 #include "../../world/TileElementsView.h"
@@ -133,8 +132,6 @@ namespace OpenRCT2::GameActions
         reinterpret_cast<TileElement*>(bannerElement)->removeBannerEntry();
         MapInvalidateTileZoom1({ _loc, _loc.z, _loc.z + 32 });
         bannerElement->remove();
-        // Banners clear path edges, which feed plaza door extraction.
-        Plaza::InvalidatePlazaRegions();
 
         return res;
     }
