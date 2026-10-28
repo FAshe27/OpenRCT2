@@ -109,6 +109,9 @@ namespace OpenRCT2
                 return availableHandymanAnimations;
             case AnimationPeepType::mechanic:
                 return availableMechanicAnimations;
+            case AnimationPeepType::worker:
+                // Workers wear the mechanic animation set (design study route (b)).
+                return availableMechanicAnimations;
             case AnimationPeepType::security:
                 return availableSecurityAnimations;
             case AnimationPeepType::entertainer:
@@ -128,6 +131,9 @@ namespace OpenRCT2
             case StaffType::security:
                 return AnimationPeepType::security;
             case StaffType::entertainer:
+                return AnimationPeepType::entertainer;
+            case StaffType::worker:
+                return AnimationPeepType::worker;
             default:
                 return AnimationPeepType::entertainer;
         }
@@ -142,6 +148,9 @@ namespace OpenRCT2
             if (animObj != nullptr && animObj->GetPeepType() == type)
                 return i;
         }
+        // No peep-animations object declares the worker type: workers use the mechanic set.
+        if (type == AnimationPeepType::worker)
+            return findPeepAnimationsIndexForType(AnimationPeepType::mechanic);
         return kObjectEntryIndexNull;
     }
 
@@ -154,6 +163,9 @@ namespace OpenRCT2
             if (animObj != nullptr && animObj->GetPeepType() == type)
                 return animObj;
         }
+        // No peep-animations object declares the worker type: workers use the mechanic set.
+        if (type == AnimationPeepType::worker)
+            return findPeepAnimationsObjectForType(AnimationPeepType::mechanic);
         return nullptr;
     }
 

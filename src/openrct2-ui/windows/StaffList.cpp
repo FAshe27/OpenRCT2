@@ -20,6 +20,7 @@
 #include <openrct2/SpriteIds.h>
 #include <openrct2/actions/GameActionRunner.h>
 #include <openrct2/actions/peep/PeepPickupAction.h>
+#include <openrct2/actions/peep/StaffAutoAssignAction.h>
 #include <openrct2/actions/peep/StaffFireAction.h>
 #include <openrct2/actions/peep/StaffHireNewAction.h>
 #include <openrct2/actions/peep/StaffSetColourAction.h>
@@ -54,7 +55,8 @@ namespace OpenRCT2::Ui::Windows
         WINDOW_STAFF_LIST_TAB_HANDYMEN,
         WINDOW_STAFF_LIST_TAB_MECHANICS,
         WINDOW_STAFF_LIST_TAB_SECURITY,
-        WINDOW_STAFF_LIST_TAB_ENTERTAINERS
+        WINDOW_STAFF_LIST_TAB_ENTERTAINERS,
+        WINDOW_STAFF_LIST_TAB_WORKERS
     };
 
     enum WindowStaffListWidgetIdx : WidgetIndex
@@ -67,12 +69,14 @@ namespace OpenRCT2::Ui::Windows
         WIDX_STAFF_LIST_MECHANICS_TAB,
         WIDX_STAFF_LIST_SECURITY_TAB,
         WIDX_STAFF_LIST_ENTERTAINERS_TAB,
+        WIDX_STAFF_LIST_WORKERS_TAB,
         WIDX_STAFF_LIST_LIST,
         WIDX_STAFF_LIST_UNIFORM_COLOUR_PICKER,
         WIDX_STAFF_LIST_HIRE_BUTTON,
         WIDX_STAFF_LIST_QUICK_FIRE,
         WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON,
         WIDX_STAFF_LIST_MAP,
+        WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON,
     };
 
     static constexpr StringId kWindowTitle = STR_STAFF;
@@ -88,12 +92,14 @@ namespace OpenRCT2::Ui::Windows
         makeTab   ({ 34, 17},                                                                                                STR_STAFF_MECHANICS_TAB_TIP                       ), // mechanics tab
         makeTab   ({ 65, 17},                                                                                                STR_STAFF_SECURITY_TAB_TIP                        ), // security guards tab
         makeTab   ({ 96, 17},                                                                                                STR_STAFF_ENTERTAINERS_TAB_TIP                    ), // entertainers tab
+        makeTab   ({127, 17},                                                                                                STR_STAFF_WORKERS_TAB_TIP                         ), // workers tab
         makeWidget({  3, 72}, {kWindowSize.width - 6, 195},                  WidgetType::scroll,    WindowColour::secondary, SCROLL_VERTICAL                                   ), // staff list
         makeWidget({130, 58}, {    12,      12},                             WidgetType::colourBtn, WindowColour::secondary, kStringIdNone,           STR_UNIFORM_COLOUR_TIP   ), // uniform colour picker
         makeWidget({165, 17}, {   145,      13},                             WidgetType::button,    WindowColour::primary  , kStringIdNone,           STR_HIRE_STAFF_TIP       ), // hire button
         makeWidget({243, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_DEMOLISH),   STR_QUICK_FIRE_STAFF     ), // quick fire staff
         makeWidget({267, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_PATROL_BTN), STR_SHOW_PATROL_AREA_TIP ), // show staff patrol area tool
-        makeWidget({291, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_MAP),        STR_SHOW_STAFF_ON_MAP_TIP)  // show staff on map button
+        makeWidget({291, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_MAP),        STR_SHOW_STAFF_ON_MAP_TIP), // show staff on map button
+        makeWidget({  3, 46}, {   118,      13},                             WidgetType::button,    WindowColour::secondary, STR_AUTO_ASSIGN_WORKERS, STR_AUTO_ASSIGN_WORKERS_TIP) // auto-assign workers button
     );
     // clang-format on
 
@@ -164,6 +170,12 @@ namespace OpenRCT2::Ui::Windows
                     _quickFireMode = !_quickFireMode;
                     invalidate();
                     break;
+                case WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON:
+                {
+                    auto autoAssignAction = GameActions::StaffAutoAssignAction();
+                    GameActions::Execute(&autoAssignAction, getGameState());
+                    break;
+                }
             }
         }
 
@@ -209,6 +221,7 @@ namespace OpenRCT2::Ui::Windows
                 case WIDX_STAFF_LIST_MECHANICS_TAB:
                 case WIDX_STAFF_LIST_SECURITY_TAB:
                 case WIDX_STAFF_LIST_ENTERTAINERS_TAB:
+                case WIDX_STAFF_LIST_WORKERS_TAB:
                 {
                     auto newSelectedTab = widgetIndex - WIDX_STAFF_LIST_HANDYMEN_TAB;
                     if (_selectedTab != newSelectedTab)
@@ -248,7 +261,21 @@ namespace OpenRCT2::Ui::Windows
             setWidgetPressed(WIDX_STAFF_LIST_MECHANICS_TAB, false);
             setWidgetPressed(WIDX_STAFF_LIST_SECURITY_TAB, false);
             setWidgetPressed(WIDX_STAFF_LIST_ENTERTAINERS_TAB, false);
+            setWidgetPressed(WIDX_STAFF_LIST_WORKERS_TAB, false);
             setWidgetPressed(_selectedTab + WIDX_STAFF_LIST_HANDYMEN_TAB, true);
+
+            // Workers have no patrol areas, but get the auto-assign button instead.
+            const bool isWorkerTab = GetSelectedStaffType() == StaffType::worker;
+            if (isWorkerTab)
+            {
+                widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setHidden();
+                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON].setVisible();
+            }
+            else
+            {
+                widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setVisible();
+                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON].setHidden();
+            }
 
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].text = GetStaffNamingConvention(GetSelectedStaffType()).ActionHire;
             widgets[WIDX_STAFF_LIST_UNIFORM_COLOUR_PICKER].setHidden();
@@ -301,6 +328,21 @@ namespace OpenRCT2::Ui::Windows
             ft.Add<StringId>(staffTypeStringId);
 
             drawText(rt, windowPos + ScreenCoordsXY{ 4, widgets[WIDX_STAFF_LIST_LIST].bottom + 2 }, STR_STAFF_LIST_COUNTER, ft);
+
+            if (GetSelectedStaffType() == StaffType::worker)
+            {
+                int32_t unassigned = 0;
+                for (auto* peep : EntityList<Staff>())
+                {
+                    if (peep->isWorker() && peep->currentRide.IsNull())
+                        unassigned++;
+                }
+                ft = Formatter();
+                ft.Add<int32_t>(unassigned);
+                drawText(
+                    rt, windowPos + ScreenCoordsXY{ 130, widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON].top + 1 },
+                    STR_WORKERS_UNASSIGNED, ft);
+            }
         }
 
         ScreenSize onScrollGetSize(int32_t scrollIndex) override
@@ -601,6 +643,7 @@ namespace OpenRCT2::Ui::Windows
             DrawTabImage(rt, WINDOW_STAFF_LIST_TAB_MECHANICS, AnimationPeepType::mechanic, gameState.park.staffMechanicColour);
             DrawTabImage(rt, WINDOW_STAFF_LIST_TAB_SECURITY, AnimationPeepType::security, gameState.park.staffSecurityColour);
             DrawTabImage(rt, WINDOW_STAFF_LIST_TAB_ENTERTAINERS, AnimationPeepType::entertainer);
+            DrawTabImage(rt, WINDOW_STAFF_LIST_TAB_WORKERS, AnimationPeepType::worker, gameState.park.staffWorkerColour);
         }
 
         void DrawTabImage(RenderTarget& rt, int32_t tabIndex, AnimationPeepType type, Drawing::Colour colour) const
@@ -706,6 +749,8 @@ namespace OpenRCT2::Ui::Windows
                     return { STR_SECURITY_GUARD_PLURAL, STR_SECURITY_GUARD_SINGULAR, STR_HIRE_SECURITY_GUARD };
                 case StaffType::entertainer:
                     return { STR_ENTERTAINER_PLURAL, STR_ENTERTAINER_SINGULAR, STR_HIRE_ENTERTAINER };
+                case StaffType::worker:
+                    return { STR_WORKER_PLURAL, STR_WORKER_SINGULAR, STR_HIRE_WORKER };
             }
         }
 

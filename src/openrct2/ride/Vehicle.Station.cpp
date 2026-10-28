@@ -13,9 +13,11 @@
 #include "../audio/Audio.h"
 #include "../config/Config.h"
 #include "../core/Speed.hpp"
+#include "../entity/EntityList.h"
 #include "../entity/EntityRegistry.h"
 #include "../entity/Guest.h"
 #include "../entity/Peep.h"
+#include "../entity/Staff.h"
 #include "../localisation/Formatter.h"
 #include "../management/NewsItem.h"
 #include "../world/Map.h"
@@ -23,6 +25,7 @@
 #include "../world/tile_element/TrackElement.h"
 #include "Ride.h"
 #include "RideData.h"
+#include "RideStaffing.h"
 #include "TrackIteration.h"
 
 using namespace OpenRCT2;
@@ -749,6 +752,37 @@ void Vehicle::UpdateWaitingToDepart()
     {
         if (!(currentStation.depart & kStationDepartFlag))
             return;
+
+        // Workers: staffing gates departures. skipCheck is the closed/broken drain
+        // path and is never gated, so riders already out are never stranded.
+        if (RideStaffing::IsDispatchBlocked(*curRide))
+            return;
+
+        // Workers: capacity scaling - only a staffed share of the fleet may be out.
+        const int32_t trainCap = RideStaffing::GetCirculatingTrainCap(*curRide);
+        if (trainCap < curRide->numTrains)
+        {
+            int32_t circulating = 0;
+            for (int32_t i = 0; i < curRide->numTrains; i++)
+            {
+                const auto* train = getGameState().entities.getEntity<Vehicle>(curRide->vehicles[i]);
+                if (train == nullptr || train == this)
+                    continue;
+                switch (train->status)
+                {
+                    case Status::movingToEndOfStation:
+                    case Status::waitingForPassengers:
+                    case Status::waitingToDepart:
+                    case Status::unloadingPassengers:
+                        break;
+                    default:
+                        circulating++;
+                        break;
+                }
+            }
+            if (circulating >= trainCap)
+                return;
+        }
     }
 
     if (curRide->getRideTypeDescriptor().flags.has(RtdFlag::canSynchroniseWithAdjacentStations))
@@ -766,6 +800,16 @@ void Vehicle::UpdateWaitingToDepart()
     }
 
     SetState(Status::departing);
+
+    // Workers at post earn a dispatch credit for their statistics page.
+    if (num_peeps > 0 && RideStaffing::GetRequiredOperators(*curRide) > 0)
+    {
+        for (auto* staff : EntityList<Staff>())
+        {
+            if (staff->isWorker() && staff->currentRide == curRide->id && staff->state == PeepState::operating)
+                staff->staffTrainsDispatched++;
+        }
+    }
 
     if (curRide->flags.has(RideFlag::cableLift))
     {

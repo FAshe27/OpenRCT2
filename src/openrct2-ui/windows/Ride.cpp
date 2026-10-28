@@ -29,6 +29,7 @@
 #include <openrct2/actions/GameActionRunner.h>
 #include <openrct2/actions/ResultWithMessage.h>
 #include <openrct2/actions/park/ParkSetParameterAction.h>
+#include <openrct2/actions/peep/StaffSetAssignmentAction.h>
 #include <openrct2/actions/ride/RideSetAppearanceAction.h>
 #include <openrct2/actions/ride/RideSetColourSchemeAction.h>
 #include <openrct2/actions/ride/RideSetNameAction.h>
@@ -62,6 +63,7 @@
 #include <openrct2/object/StationObject.h>
 #include <openrct2/ride/RideConstruction.h>
 #include <openrct2/ride/RideData.h>
+#include <openrct2/ride/RideStaffing.h>
 #include <openrct2/ride/ShopItem.h>
 #include <openrct2/ride/TrackData.h>
 #include <openrct2/ride/TrackDesign.h>
@@ -189,6 +191,7 @@ namespace OpenRCT2::Ui::Windows
         WIDX_LOCATE_MECHANIC,
         WIDX_REFURBISH_RIDE,
         WIDX_FORCE_BREAKDOWN,
+        WIDX_ASSIGN_OPERATOR,
 
         WIDX_PRIMARY_PREVIEW_GROUP = 14,
         WIDX_PRIMARY_PREVIEW,
@@ -341,7 +344,8 @@ namespace OpenRCT2::Ui::Windows
         makeWidget     ({297,  77}, {  11, 12}, WidgetType::button,       WindowColour::secondary, STR_DROPDOWN_GLYPH,        STR_SELECT_HOW_OFTEN_A_MECHANIC_SHOULD_CHECK_THIS_RIDE),
         makeWidget     ({289, 123}, {  24, 24}, WidgetType::flatBtn,      WindowColour::secondary, 0xFFFFFFFF,                STR_LOCATE_NEAREST_AVAILABLE_MECHANIC_TIP             ),
         makeWidget     ({265, 123}, {  24, 24}, WidgetType::flatBtn,      WindowColour::secondary, ImageId(SPR_CONSTRUCTION), STR_REFURBISH_RIDE_TIP                                ),
-        makeWidget     ({241, 123}, {  24, 24}, WidgetType::flatBtn,      WindowColour::secondary, ImageId(SPR_NO_ENTRY),     STR_DEBUG_FORCE_BREAKDOWN_TIP                         )
+        makeWidget     ({241, 123}, {  24, 24}, WidgetType::flatBtn,      WindowColour::secondary, ImageId(SPR_NO_ENTRY),     STR_DEBUG_FORCE_BREAKDOWN_TIP                         ),
+        makeWidget     ({217, 123}, {  24, 24}, WidgetType::flatBtn,      WindowColour::secondary, 0xFFFFFFFF,                STR_ASSIGN_OPERATOR_TIP                               )
     );
 
     // 0x009AE2A4
@@ -3874,6 +3878,40 @@ namespace OpenRCT2::Ui::Windows
             }
         }
 
+        void AssignNearestWorker()
+        {
+            auto ride = GetRide(rideId);
+            if (ride == nullptr)
+                return;
+
+            // The nearest unassigned worker wins; ties go to the lowest entity id.
+            Staff* bestWorker = nullptr;
+            int64_t bestDistance = 0;
+            for (auto* staff : EntityList<Staff>())
+            {
+                if (!staff->isWorker() || !staff->currentRide.IsNull() || staff->state == PeepState::picked)
+                    continue;
+                const int64_t dx = static_cast<int64_t>(staff->x) - ride->overallView.x;
+                const int64_t dy = static_cast<int64_t>(staff->y) - ride->overallView.y;
+                const int64_t distance = dx * dx + dy * dy;
+                if (bestWorker == nullptr || distance < bestDistance
+                    || (distance == bestDistance && staff->id.ToUnderlying() < bestWorker->id.ToUnderlying()))
+                {
+                    bestWorker = staff;
+                    bestDistance = distance;
+                }
+            }
+
+            if (bestWorker == nullptr)
+            {
+                ContextShowError(STR_NO_UNASSIGNED_WORKERS, kStringIdNone, {});
+                return;
+            }
+
+            auto action = GameActions::StaffSetAssignmentAction(bestWorker->id, rideId);
+            GameActions::Execute(&action, getGameState());
+        }
+
         void MaintenanceOnMouseUp(WidgetIndex widgetIndex)
         {
             switch (widgetIndex)
@@ -3896,6 +3934,9 @@ namespace OpenRCT2::Ui::Windows
                 case WIDX_LOCATE_MECHANIC:
                     LocateMechanic();
                     break;
+                case WIDX_ASSIGN_OPERATOR:
+                    AssignNearestWorker();
+                    break;
                 case WIDX_REFURBISH_RIDE:
                     ContextOpenDetailWindow(WindowDetail::refurbishRide, number);
                     break;
@@ -3904,7 +3945,7 @@ namespace OpenRCT2::Ui::Windows
 
         void MaintenanceResize()
         {
-            auto bottom = widgets[WIDX_LOCATE_MECHANIC].bottom + 6 - getTitleBarDiffNormal();
+            auto bottom = widgets[WIDX_LOCATE_MECHANIC].bottom + 22 - getTitleBarDiffNormal();
             WindowSetResize(*this, { kMinimumWindowWidth, bottom }, { kMinimumWindowWidth, bottom });
         }
 
@@ -4140,6 +4181,24 @@ namespace OpenRCT2::Ui::Windows
                 widgets[WIDX_FORCE_BREAKDOWN].setHidden();
             }
 
+            {
+                const auto staffing = RideStaffing::GetStaffing(*ride);
+                bool hasUnassignedWorker = false;
+                if (staffing.required > 0 && staffing.assigned < staffing.required)
+                {
+                    for (auto* staff : EntityList<Staff>())
+                    {
+                        if (staff->isWorker() && staff->currentRide.IsNull())
+                        {
+                            hasUnassignedWorker = true;
+                            break;
+                        }
+                    }
+                }
+                widgets[WIDX_ASSIGN_OPERATOR].setHidden(staffing.required <= 0);
+                setWidgetDisabled(WIDX_ASSIGN_OPERATOR, !hasUnassignedWorker);
+            }
+
             if (ride->getRideTypeDescriptor().availableBreakdowns.isEmpty() || !ride->flags.has(RideFlag::everBeenOpened))
             {
                 setWidgetDisabled(WIDX_REFURBISH_RIDE, true);
@@ -4172,6 +4231,34 @@ namespace OpenRCT2::Ui::Windows
             auto screenCoords = windowPos + ScreenCoordsXY{ widget->left, widget->top };
             auto image = ImageId(SPR_MECHANIC, Drawing::Colour::black, getGameState().park.staffMechanicColour);
             GfxDrawSprite(rt, image, screenCoords);
+
+            // Assign operator button image (a worker, in the worker uniform colour)
+            widget = &widgets[WIDX_ASSIGN_OPERATOR];
+            if (widget->isVisible())
+            {
+                screenCoords = windowPos + ScreenCoordsXY{ widget->left, widget->top };
+                image = ImageId(SPR_MECHANIC, Drawing::Colour::black, getGameState().park.staffWorkerColour);
+                GfxDrawSprite(rt, image, screenCoords);
+            }
+
+            // Operators line
+            {
+                const auto staffing = RideStaffing::GetStaffing(*ride);
+                if (staffing.required > 0)
+                {
+                    auto operatorsFt = Formatter();
+                    operatorsFt.Add<int32_t>(staffing.atPost);
+                    operatorsFt.Add<int32_t>(staffing.required);
+                    StringId operatorsString = STR_RIDE_OPERATORS;
+                    if (staffing.assigned > staffing.atPost)
+                    {
+                        operatorsString = STR_RIDE_OPERATORS_ENROUTE;
+                        operatorsFt.Add<int32_t>(staffing.assigned - staffing.atPost);
+                    }
+                    auto operatorsCoords = windowPos + ScreenCoordsXY{ 4, widgets[WIDX_LOCATE_MECHANIC].bottom + 5 };
+                    drawText(rt, operatorsCoords, operatorsString, operatorsFt);
+                }
+            }
 
             // Inspection label
             widget = &widgets[WIDX_INSPECTION_INTERVAL];

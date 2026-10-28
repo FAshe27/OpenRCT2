@@ -24,6 +24,7 @@
 #include "../paint/tile_element/Paint.TileElement.h"
 #include "../peep/GuestPathfinding.h"
 #include "../ride/RideData.h"
+#include "../ride/RideStaffing.h"
 #include "../ride/TrackIteration.h"
 #include "../ride/Vehicle.h"
 #include "../scenario/Scenario.h"
@@ -967,6 +968,8 @@ namespace OpenRCT2
                 return doMiscPathFinding();
             case StaffType::entertainer:
                 return doEntertainerPathFinding();
+            case StaffType::worker:
+                return doWorkerPathFinding();
 
             default:
                 assert(false);
@@ -997,6 +1000,8 @@ namespace OpenRCT2
                 return park.staffSecurityColour;
             case StaffType::entertainer:
                 return Drawing::Colour::black;
+            case StaffType::worker:
+                return park.staffWorkerColour;
             default:
                 assert(false);
                 return Drawing::Colour::black;
@@ -1016,6 +1021,9 @@ namespace OpenRCT2
                 break;
             case StaffType::security:
                 park.staffSecurityColour = value;
+                break;
+            case StaffType::worker:
+                park.staffWorkerColour = value;
                 break;
             default:
                 return GameActions::Result(
@@ -1464,6 +1472,460 @@ namespace OpenRCT2
         subState = 0;
     }
 
+    // Workers (ride/stall operators)
+    //
+    // A worker's assignment lives in Peep::currentRide (already serialised). Travelling to the
+    // post reuses PeepState::headingToInspection, mirroring the mechanic's inspection trip;
+    // standing at the post is PeepState::operating. Only workers at post count towards a
+    // ride's staffing (see RideStaffing). Workers use stock staff pathfinding throughout;
+    // the guest distance fields are never consulted for staff.
+
+    void Staff::tick128UpdateWorker()
+    {
+        if (state == PeepState::picked)
+            return;
+
+        auto* ride = GetRide(currentRide);
+        const bool validAssignment = ride != nullptr && RideStaffing::GetRequiredOperators(*ride) > 0;
+
+        if (!validAssignment)
+        {
+            // Assignment removed, or the ride was demolished / no longer needs operators.
+            if (state == PeepState::operating || state == PeepState::headingToInspection)
+            {
+                if (ride != nullptr)
+                    workerLeavePost();
+                else
+                    setState(PeepState::falling);
+            }
+            currentRide = RideId::GetNull();
+            return;
+        }
+
+        if (state == PeepState::operating && ride->status == RideStatus::closed)
+        {
+            workerLeavePost();
+            return;
+        }
+
+        if ((state == PeepState::patrolling || state == PeepState::falling) && ride->status != RideStatus::closed)
+        {
+            workerBeginHeadingToPost();
+        }
+    }
+
+    bool Staff::workerBeginHeadingToPost()
+    {
+        auto* ride = GetRide(currentRide);
+        if (ride == nullptr)
+            return false;
+
+        if (ride->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
+        {
+            currentRideStation = StationIndex::FromUnderlying(0);
+        }
+        else
+        {
+            // Post at the station with the fewest operators already heading there or at post.
+            bool foundStation = false;
+            auto bestStation = StationIndex::FromUnderlying(0);
+            int32_t bestCount = 0;
+            const auto stations = ride->getStations();
+            for (size_t i = 0; i < stations.size(); i++)
+            {
+                const auto stationIndex = StationIndex::FromUnderlying(static_cast<uint8_t>(i));
+                const auto& station = ride->getStation(stationIndex);
+                if (station.entrance.isNull() && station.exit.isNull())
+                    continue;
+
+                int32_t count = 0;
+                for (auto* other : EntityList<Staff>())
+                {
+                    if (other != this && other->isWorker() && other->currentRide == ride->id
+                        && other->currentRideStation == stationIndex
+                        && (other->state == PeepState::operating || other->state == PeepState::headingToInspection))
+                    {
+                        count++;
+                    }
+                }
+                if (!foundStation || count < bestCount)
+                {
+                    foundStation = true;
+                    bestStation = stationIndex;
+                    bestCount = count;
+                }
+            }
+            if (!foundStation)
+                return false;
+            currentRideStation = bestStation;
+        }
+
+        setState(PeepState::headingToInspection);
+        subState = 0;
+        resetPathfindGoal();
+        return true;
+    }
+
+    void Staff::workerLeavePost()
+    {
+        // Step off the platform / stall tile onto an adjacent path tile, then resume patrolling.
+        const auto currentTile = TileCoordsXY{ x, y };
+        for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
+        {
+            const auto neighbour = TileCoordsXY(currentTile.toCoordsXY() + CoordsDirectionDelta[dir]);
+            auto* tileElement = MapGetFirstElementAt(neighbour);
+            if (tileElement == nullptr)
+                continue;
+            do
+            {
+                if (tileElement->getType() == TileElementType::path && !tileElement->isGhost())
+                {
+                    const auto dest = neighbour.toCoordsXY() + CoordsXY{ 16, 16 };
+                    moveTo(CoordsXYZ{ dest, tileElement->getBaseZ() });
+                    setState(PeepState::patrolling);
+                    subState = 0;
+                    resetPathfindGoal();
+                    return;
+                }
+            } while (!(tileElement++)->isLastForTile());
+        }
+
+        // No adjacent path (e.g. the ride was demolished around us): standard recovery.
+        setState(PeepState::falling);
+    }
+
+    void Staff::updateWorkerHeadingToPost()
+    {
+        auto* ride = GetRide(currentRide);
+        if (ride == nullptr || ride->status == RideStatus::closed)
+        {
+            setState(PeepState::falling);
+            return;
+        }
+
+        const bool isShop = ride->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility);
+
+        if (subState == 0)
+        {
+            mechanicTimeSinceCall = 0;
+            resetPathfindGoal();
+            subState = 2;
+        }
+
+        if (subState <= 3)
+        {
+            mechanicTimeSinceCall++;
+            if (mechanicTimeSinceCall > 2500)
+            {
+                // Could not reach the post; resume patrolling, the next think retries.
+                setState(PeepState::falling);
+                return;
+            }
+
+            if (!checkForPath())
+                return;
+
+            if (shouldWaitForLevelCrossing())
+                return;
+
+            if (isShop)
+            {
+                const auto shopTile = TileCoordsXY(ride->getStation().start);
+                const auto currentTile = TileCoordsXY{ x, y };
+                if (currentTile == shopTile)
+                {
+                    subState = 4;
+                }
+                else if (subState == 2)
+                {
+                    // Staff bounce off shop tiles in PeepInteractWithShop, so the last step
+                    // onto the stall is a direct step-in (like a mechanic entering a station):
+                    // once an adjacent tile is reached, stop pathfinding and step across.
+                    bool adjacent = false;
+                    for (Direction dir = 0; dir < kNumOrthogonalDirections && !adjacent; dir++)
+                    {
+                        adjacent = (currentTile + TileDirectionDelta[dir]) == shopTile;
+                    }
+                    if (!adjacent)
+                    {
+                        performNextAction();
+                        return;
+                    }
+
+                    auto* tileElement = MapGetFirstElementAt(shopTile);
+                    if (tileElement != nullptr)
+                    {
+                        do
+                        {
+                            if (tileElement->getType() == TileElementType::track
+                                && tileElement->asTrack()->getRideIndex() == ride->id)
+                            {
+                                z = tileElement->baseHeight * 4;
+                                break;
+                            }
+                        } while (!(tileElement++)->isLastForTile());
+                    }
+                    setDestination(shopTile.toCoordsXY() + CoordsXY{ 16, 16 }, 2);
+                    subState = 4;
+                }
+
+                // Step-in (subState 4): walk straight onto the stall tile.
+                if (auto loc = updateAction(); loc.has_value())
+                {
+                    moveTo({ loc.value(), z });
+                    return;
+                }
+
+                // Arrived on the stall tile: face the counter front and take post.
+                auto* tileElement = MapGetFirstElementAt(shopTile);
+                if (tileElement != nullptr)
+                {
+                    do
+                    {
+                        if (tileElement->getType() == TileElementType::track
+                            && tileElement->asTrack()->getRideIndex() == ride->id)
+                        {
+                            peepDirection = DirectionReverse(tileElement->getDirection());
+                            orientation = peepDirection << 3;
+                            break;
+                        }
+                    } while (!(tileElement++)->isLastForTile());
+                }
+                setState(PeepState::operating);
+                subState = 0;
+                return;
+            }
+
+            const auto [pathingResult, rideEntranceExitElement] = performNextAction();
+            if (!(pathingResult & PATHING_RIDE_EXIT) && !(pathingResult & PATHING_RIDE_ENTRANCE))
+            {
+                return;
+            }
+
+            if (currentRide != rideEntranceExitElement->asEntrance()->getRideIndex())
+                return;
+
+            StationIndex exitIndex = rideEntranceExitElement->asEntrance()->getStationIndex();
+            if (currentRideStation != exitIndex)
+                return;
+
+            if (pathingResult & PATHING_RIDE_ENTRANCE)
+            {
+                if (!ride->getStation(exitIndex).exit.isNull())
+                {
+                    return;
+                }
+            }
+
+            peepDirection = rideEntranceExitElement->getDirection();
+
+            // Spread this station's operators along the platform, ranked by entity id so the
+            // slots are stable while the crew stays the same.
+            int32_t rank = 0;
+            int32_t crew = 1;
+            for (auto* other : EntityList<Staff>())
+            {
+                if (other == this || !other->isWorker() || other->currentRide != currentRide
+                    || other->currentRideStation != currentRideStation)
+                    continue;
+                if (other->state != PeepState::operating && other->state != PeepState::headingToInspection)
+                    continue;
+                crew++;
+                if (other->id.ToUnderlying() < id.ToUnderlying())
+                    rank++;
+            }
+            const int32_t along = (2 * rank - (crew - 1)) * 12;
+            const Direction platformDirection = (peepDirection + 1) & 3;
+            const auto alongOffset = CoordsXY{ DirectionOffsets[platformDirection].x * along / 32,
+                                               DirectionOffsets[platformDirection].y * along / 32 };
+
+            auto newDestination = CoordsXY{ 16, 16 } + nextLoc + (DirectionOffsets[peepDirection] * 53) + alongOffset;
+            setDestination(newDestination, 2);
+            orientation = peepDirection << 3;
+
+            z = rideEntranceExitElement->baseHeight * 4;
+            subState = 4;
+            // Falls through into the step-in below
+        }
+
+        if (isShop)
+            return;
+
+        int16_t delta_y = abs(getLocation().y - getDestination().y);
+        if (auto loc = updateAction(); loc.has_value())
+        {
+            auto newZ = ride->getStation(currentRideStation).getBaseZ();
+            if (delta_y < 20)
+            {
+                newZ += ride->getRideTypeDescriptor().Heights.PlatformHeight;
+            }
+
+            moveTo({ loc.value(), newZ });
+            return;
+        }
+
+        setState(PeepState::operating);
+        subState = 0;
+    }
+
+    void Staff::updateOperating()
+    {
+        auto* ride = GetRide(currentRide);
+        if (ride == nullptr)
+        {
+            setState(PeepState::falling);
+            return;
+        }
+
+        // Stand at post. Post validity (ride closed, assignment removed, ride demolished)
+        // is re-checked every 128 ticks in tick128UpdateWorker.
+        if (auto loc = updateAction(); loc.has_value())
+        {
+            moveTo({ loc.value(), z });
+        }
+        invalidate();
+    }
+
+    bool Staff::doWorkerPathFinding()
+    {
+        if (state != PeepState::headingToInspection || currentRide.IsNull())
+        {
+            // Not travelling to a post: wander like other unassigned staff.
+            return doMiscPathFinding();
+        }
+
+        uint8_t validDirections = getValidPatrolDirections(nextLoc);
+        Direction newDirection = kInvalidDirection;
+        if (getNextIsSurface())
+        {
+            newDirection = mechanicDirectionSurface();
+        }
+        else
+        {
+            auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ nextLoc });
+            if (pathElement == nullptr)
+                return true;
+
+            newDirection = workerDirectionPath(validDirections, pathElement);
+        }
+
+        assert(DirectionValid(newDirection));
+
+        CoordsXY chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
+
+        while (!MapIsLocationValid(chosenTile))
+        {
+            newDirection = mechanicDirectionSurface();
+            chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
+        }
+
+        peepDirection = newDirection;
+        auto tolerance = (ScenarioRand() & 7) + 2;
+        setDestination(chosenTile + CoordsXY{ 16, 16 }, tolerance);
+
+        return false;
+    }
+
+    Direction Staff::workerDirectionPath(uint8_t validDirections, PathElement* pathElement)
+    {
+        uint32_t pathDirections = pathElement->getEdges();
+        pathDirections &= validDirections;
+
+        if (pathDirections == 0)
+        {
+            return mechanicDirectionSurface();
+        }
+
+        // Check if this is dead end - i.e. only way out is the reverse direction.
+        pathDirections &= ~(1 << DirectionReverse(peepDirection));
+        if (pathDirections == 0)
+        {
+            pathDirections |= (1 << DirectionReverse(peepDirection));
+        }
+
+        Direction direction = Numerics::bitScanForward(pathDirections);
+        pathDirections &= ~(1 << direction);
+        if (pathDirections == 0)
+        {
+            if (state != PeepState::headingToInspection)
+            {
+                return direction;
+            }
+
+            if (subState != 2)
+            {
+                return direction;
+            }
+            subState = 3;
+        }
+
+        pathDirections |= (1 << direction);
+
+        // Worker is heading to their assigned ride or stall.
+        auto* ride = GetRide(currentRide);
+        if (ride != nullptr && state == PeepState::headingToInspection)
+        {
+            TileCoordsXYZ goalPos;
+            if (ride->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
+            {
+                goalPos = TileCoordsXYZ{ ride->getStation().getStart() };
+            }
+            else
+            {
+                /* Find location of the exit for the target ride station
+                 * or if the ride has no exit, the entrance. */
+                TileCoordsXYZD location = ride->getStation(currentRideStation).exit;
+                if (location.isNull())
+                {
+                    location = ride->getStation(currentRideStation).entrance;
+
+                    // If no entrance is present either. This is an incorrect state.
+                    if (location.isNull())
+                    {
+                        return mechanicDirectionPathRand(pathDirections);
+                    }
+                }
+                goalPos = TileCoordsXYZ{ location };
+            }
+
+            Direction pathfindDirection = PathFinding::ChooseDirection(
+                TileCoordsXYZ{ nextLoc }, goalPos, *this, false, RideId::GetNull());
+            if (pathfindDirection == kInvalidDirection)
+            {
+                /* Heuristic search failed for all directions.
+                 * Reset the PathfindGoal - this means that the PathfindHistory
+                 * will be reset in the next call to GuestPathfinding::ChooseDirection().
+                 * This lets the heuristic search "try again" in case the player has
+                 * edited the path layout or the worker was already stuck. */
+                resetPathfindGoal();
+                return mechanicDirectionPathRand(pathDirections);
+            }
+
+            return pathfindDirection;
+        }
+        return mechanicDirectionPathRand(pathDirections);
+    }
+
+    void Staff::setWorkerAssignment(RideId rideId)
+    {
+        if (currentRide == rideId)
+            return;
+
+        // Stepping down from a post needs the old ride's geometry, so leave before switching.
+        if (state == PeepState::operating || state == PeepState::headingToInspection)
+        {
+            if (GetRide(currentRide) != nullptr)
+                workerLeavePost();
+            else
+                setState(PeepState::falling);
+        }
+
+        currentRide = rideId;
+        currentRideStation = StationIndex::FromUnderlying(0);
+        subState = 0;
+        resetPathfindGoal();
+    }
+
     /** rct2: 0x00992A5C */
     static constexpr CoordsXY kWateringUseOffsets[] = {
         { 3, 16 }, { 16, 29 }, { 29, 16 }, { 16, 3 }, { 3, 29 }, { 29, 29 }, { 29, 3 }, { 3, 3 },
@@ -1717,6 +2179,12 @@ namespace OpenRCT2
 
     void Staff::tick128UpdateStaff()
     {
+        if (isWorker())
+        {
+            tick128UpdateWorker();
+            return;
+        }
+
         if (assignedStaffType != StaffType::security)
             return;
 
@@ -1756,6 +2224,11 @@ namespace OpenRCT2
     bool Staff::isEntertainer() const
     {
         return assignedStaffType == StaffType::entertainer;
+    }
+
+    bool Staff::isWorker() const
+    {
+        return assignedStaffType == StaffType::worker;
     }
 
     void Staff::update()
@@ -1835,7 +2308,13 @@ namespace OpenRCT2
                     updateWatering();
                     break;
                 case PeepState::headingToInspection:
-                    updateHeadingToInspect();
+                    if (isWorker())
+                        updateWorkerHeadingToPost();
+                    else
+                        updateHeadingToInspect();
+                    break;
+                case PeepState::operating:
+                    updateOperating();
                     break;
                 default:
                     // TODO reset to default state
@@ -2655,6 +3134,8 @@ namespace OpenRCT2
                 return 60.00_GBP;
             case StaffType::entertainer:
                 return 55.00_GBP;
+            case StaffType::worker:
+                return 50.00_GBP;
         }
     }
 

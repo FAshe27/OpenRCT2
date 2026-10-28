@@ -34,6 +34,7 @@ namespace OpenRCT2
         mechanic,
         security,
         entertainer,
+        worker,
 
         count
     };
@@ -55,6 +56,7 @@ namespace OpenRCT2
             uint32_t staffLawnsMown;
             uint32_t staffRidesFixed;
             uint32_t staffGuestsEntertained;
+            uint32_t staffTrainsDispatched; // Workers: trains dispatched from their ride while at post
         };
         union // 2nd statistic
         {
@@ -75,6 +77,7 @@ namespace OpenRCT2
         void tick128UpdateStaff();
         bool isMechanic() const;
         bool isEntertainer() const;
+        bool isWorker() const;
         bool isPatrolAreaSet(const CoordsXY& coords) const;
         bool isLocationInPatrol(const CoordsXY& loc) const;
         bool isLocationOnPatrolEdge(const CoordsXY& loc) const;
@@ -86,6 +89,8 @@ namespace OpenRCT2
 
         static void resetStats();
         void serialise(DataSerialiser& stream);
+
+        void setWorkerAssignment(RideId rideId);
 
         void clearPatrolArea();
         void setPatrolArea(const CoordsXY& coords, bool value);
@@ -114,6 +119,15 @@ namespace OpenRCT2
         bool updateFixingLeaveByEntranceExit(bool firstRun, const Ride& ride);
         void updateRideInspected(RideId rideIndex);
         void updateHeadingToInspect();
+
+        // Workers (ride/stall operators)
+        void tick128UpdateWorker();
+        void updateWorkerHeadingToPost();
+        void updateOperating();
+        bool workerBeginHeadingToPost();
+        void workerLeavePost();
+        bool doWorkerPathFinding();
+        Direction workerDirectionPath(uint8_t validDirections, PathElement* pathElement);
 
         bool doHandymanPathFinding();
         bool doMechanicPathFinding();

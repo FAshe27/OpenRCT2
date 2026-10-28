@@ -30,6 +30,7 @@
 #include "../world/tile_element/TrackElement.h"
 #include "Ride.h"
 #include "RideData.h"
+#include "RideStaffing.h"
 #include "Track.h"
 #include "TrackData.h"
 #include "TrackIteration.h"
@@ -1145,6 +1146,8 @@ namespace OpenRCT2
             waitingTime = std::min(waitingTime, static_cast<uint8_t>(127));
         }
 
+        // Workers: an understaffed ride dispatches less often (dwell stretch).
+        waitingTime = static_cast<uint8_t>(RideStaffing::ScaleDwellTicks(*curRide, waitingTime));
         currentStation.depart |= waitingTime;
     }
 

@@ -209,6 +209,12 @@ namespace OpenRCT2::GameActions
             newPeep->staffMowingTimeout = 0;
             newPeep->patrolInfo = nullptr;
 
+            if (_staffType == static_cast<uint8_t>(StaffType::worker))
+            {
+                // The first Worker hire engages ride/stall staffing park-wide, permanently.
+                park.flags.set(ParkFlag::workersEngaged);
+            }
+
             res.setData(StaffHireNewActionResult{ newPeep->id });
         }
 

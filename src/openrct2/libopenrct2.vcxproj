@@ -119,6 +119,8 @@
     <ClInclude Include="actions\peep\PeepSpawnPlaceAction.h" />
     <ClInclude Include="actions\peep\StaffFireAction.h" />
     <ClInclude Include="actions\peep\StaffHireNewAction.h" />
+    <ClInclude Include="actions\peep\StaffAutoAssignAction.h" />
+    <ClInclude Include="actions\peep\StaffSetAssignmentAction.h" />
     <ClInclude Include="actions\peep\StaffSetColourAction.h" />
     <ClInclude Include="actions\peep\StaffSetCostumeAction.h" />
     <ClInclude Include="actions\peep\StaffSetNameAction.h" />
@@ -489,6 +491,7 @@
     <ClInclude Include="ride\RideEntry.h" />
     <ClInclude Include="ride\RideManager.h" />
     <ClInclude Include="ride\RideRatings.h" />
+    <ClInclude Include="ride\RideStaffing.h" />
     <ClInclude Include="ride\RideStringIds.h" />
     <ClInclude Include="ride\RideTypes.h" />
     <ClInclude Include="ride\rtd\coaster\AirPoweredVerticalCoaster.h" />
@@ -793,6 +796,8 @@
     <ClCompile Include="actions\peep\PeepSpawnPlaceAction.cpp" />
     <ClCompile Include="actions\peep\StaffFireAction.cpp" />
     <ClCompile Include="actions\peep\StaffHireNewAction.cpp" />
+    <ClCompile Include="actions\peep\StaffAutoAssignAction.cpp" />
+    <ClCompile Include="actions\peep\StaffSetAssignmentAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetColourAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetCostumeAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetNameAction.cpp" />
@@ -1194,6 +1199,7 @@
     <ClCompile Include="ride\RideData.cpp" />
     <ClCompile Include="ride\RideManager.cpp" />
     <ClCompile Include="ride\RideRatings.cpp" />
+    <ClCompile Include="ride\RideStaffing.cpp" />
     <ClCompile Include="ride\ShopItem.cpp" />
     <ClCompile Include="ride\Station.cpp" />
     <ClCompile Include="ride\Track.cpp" />

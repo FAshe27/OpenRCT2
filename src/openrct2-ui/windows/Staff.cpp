@@ -18,6 +18,7 @@
 #include <openrct2/SpriteIds.h>
 #include <openrct2/actions/GameActionRunner.h>
 #include <openrct2/actions/peep/PeepPickupAction.h>
+#include <openrct2/actions/peep/StaffSetAssignmentAction.h>
 #include <openrct2/actions/peep/StaffSetCostumeAction.h>
 #include <openrct2/actions/peep/StaffSetNameAction.h>
 #include <openrct2/actions/peep/StaffSetOrdersAction.h>
@@ -32,11 +33,14 @@
 #include <openrct2/interface/Viewport.h>
 #include <openrct2/interface/WidgetIndexGlobals.h>
 #include <openrct2/localisation/Formatter.h>
+#include <openrct2/localisation/Language.h>
 #include <openrct2/network/Network.h>
 #include <openrct2/object/ObjectManager.h>
 #include <openrct2/object/PeepAnimationsObject.h>
 #include <openrct2/peep/PeepActionFormat.h>
 #include <openrct2/peep/PeepAnimations.h>
+#include <openrct2/ride/RideManager.hpp>
+#include <openrct2/ride/RideStaffing.h>
 #include <openrct2/ui/WindowManager.h>
 #include <openrct2/windows/Intent.h>
 #include <openrct2/world/MapSelection.h>
@@ -131,6 +135,8 @@ namespace OpenRCT2::Ui::Windows
     {
     private:
         std::vector<AvailableCostume> _availableCostumes;
+        std::vector<RideId> _assignmentRideIds;
+        u8string _assignmentText;
         uint16_t _tabAnimationOffset = 0;
         int32_t _pickedPeepOldX = kLocationNull;
         u8string _windowTitle{};
@@ -238,6 +244,9 @@ namespace OpenRCT2::Ui::Windows
             {
                 case WINDOW_STAFF_OVERVIEW:
                     OverviewDraw(rt);
+                    break;
+                case WINDOW_STAFF_OPTIONS:
+                    OptionsDraw(rt);
                     break;
                 case WINDOW_STAFF_STATISTICS:
                     StatsDraw(rt);
@@ -526,6 +535,10 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_PICKUP].right = width - 2;
 
             setWidgetPressed(WIDX_PATROL, WindowPatrolAreaGetCurrentStaffId() == staff->id);
+            if (staff->isWorker())
+                widgets[WIDX_PATROL].setHidden();
+            else
+                widgets[WIDX_PATROL].setVisible();
 
             widgets[WIDX_PATROL].left = width - 25;
             widgets[WIDX_PATROL].right = width - 2;
@@ -785,6 +798,12 @@ namespace OpenRCT2::Ui::Windows
                 return;
             }
 
+            if (staff->isWorker())
+            {
+                ShowAssignmentDropdown(ddWidget, *staff);
+                return;
+            }
+
             int32_t checkedIndex = -1;
             auto numCostumes = _availableCostumes.size();
             for (auto i = 0u; i < numCostumes; i++)
@@ -817,9 +836,65 @@ namespace OpenRCT2::Ui::Windows
             if (dropdownIndex == -1)
                 return;
 
+            auto* staff = GetStaff();
+            if (staff != nullptr && staff->isWorker())
+            {
+                if (dropdownIndex >= 0 && static_cast<size_t>(dropdownIndex) < _assignmentRideIds.size())
+                {
+                    auto action = GameActions::StaffSetAssignmentAction(staff->id, _assignmentRideIds[dropdownIndex]);
+                    GameActions::Execute(&action, getGameState());
+                }
+                return;
+            }
+
             ObjectEntryIndex costume = _availableCostumes[dropdownIndex].index;
             auto staffSetCostumeAction = GameActions::StaffSetCostumeAction(EntityId::FromUnderlying(number), costume);
             GameActions::Execute(&staffSetCostumeAction, getGameState());
+        }
+
+        void ShowAssignmentDropdown(Widget* ddWidget, const Staff& staff)
+        {
+            _assignmentRideIds.clear();
+            _assignmentRideIds.push_back(RideId::GetNull());
+
+            int32_t itemIndex = 0;
+            gDropdown.items[itemIndex] = Dropdown::MenuLabel(STR_STAFF_UNASSIGNED);
+            if (staff.currentRide.IsNull())
+                gDropdown.items[itemIndex].setChecked(true);
+            itemIndex++;
+
+            for (auto& ride : RideManager(getGameState()))
+            {
+                if (ride.status == RideStatus::closed)
+                    continue;
+                const auto staffing = RideStaffing::GetStaffing(ride);
+                if (staffing.required <= 0)
+                    continue;
+
+                auto label = ride.getName() + " (" + std::to_string(staffing.assigned) + "/" + std::to_string(staffing.required)
+                    + ")";
+                gDropdown.items[itemIndex] = Dropdown::MenuLabel(u8string(label));
+                if (staff.currentRide == ride.id)
+                    gDropdown.items[itemIndex].setChecked(true);
+                _assignmentRideIds.push_back(ride.id);
+                itemIndex++;
+            }
+
+            auto ddPos = ScreenCoordsXY{ ddWidget->left + windowPos.x, ddWidget->top + windowPos.y };
+            int32_t ddHeight = ddWidget->height();
+            int32_t ddWidth = ddWidget->width() - 4;
+            WindowDropdownShowTextCustomWidth(ddPos, ddHeight, colours[1], 0, {}, itemIndex, ddWidth);
+        }
+
+        void OptionsDraw(Drawing::RenderTarget& rt)
+        {
+            auto staff = GetStaff();
+            if (staff == nullptr || !staff->isWorker())
+            {
+                return;
+            }
+
+            drawText(rt, windowPos + ScreenCoordsXY{ 5, 52 }, STR_STAFF_ASSIGNMENT);
         }
 
         void OptionsPrepareDraw()
@@ -832,6 +907,32 @@ namespace OpenRCT2::Ui::Windows
 
             switch (staff->assignedStaffType)
             {
+                case StaffType::worker:
+                {
+                    widgets[WIDX_CHECKBOX_1].setHidden();
+                    widgets[WIDX_CHECKBOX_2].setHidden();
+                    widgets[WIDX_CHECKBOX_3].setHidden();
+                    widgets[WIDX_CHECKBOX_4].setHidden();
+                    widgets[WIDX_COSTUME_BOX].setVisible();
+                    widgets[WIDX_COSTUME_BTN].setVisible();
+                    // Leave room for the "Assignment" label drawn by OptionsDraw.
+                    widgets[WIDX_COSTUME_BOX].top = 66;
+                    widgets[WIDX_COSTUME_BOX].bottom = 78;
+                    widgets[WIDX_COSTUME_BTN].top = 67;
+                    widgets[WIDX_COSTUME_BTN].bottom = 77;
+
+                    auto* ride = GetRide(staff->currentRide);
+                    if (ride != nullptr)
+                    {
+                        _assignmentText = ride->getName();
+                    }
+                    else
+                    {
+                        _assignmentText = LanguageGetString(STR_STAFF_UNASSIGNED);
+                    }
+                    widgets[WIDX_COSTUME_BOX].setString(_assignmentText.c_str());
+                    break;
+                }
                 case StaffType::entertainer:
                 {
                     widgets[WIDX_CHECKBOX_1].setHidden();
@@ -840,6 +941,10 @@ namespace OpenRCT2::Ui::Windows
                     widgets[WIDX_CHECKBOX_4].setHidden();
                     widgets[WIDX_COSTUME_BOX].setVisible();
                     widgets[WIDX_COSTUME_BTN].setVisible();
+                    widgets[WIDX_COSTUME_BOX].top = 50;
+                    widgets[WIDX_COSTUME_BOX].bottom = 62;
+                    widgets[WIDX_COSTUME_BTN].top = 51;
+                    widgets[WIDX_COSTUME_BTN].bottom = 61;
 
                     auto pos = std::find_if(_availableCostumes.begin(), _availableCostumes.end(), [staff](auto costume) {
                         return costume.index == staff->animationObjectIndex;
@@ -989,6 +1094,11 @@ namespace OpenRCT2::Ui::Windows
                     ft = Formatter();
                     ft.Add<uint32_t>(staff->staffGuestsEntertained);
                     drawText(rt, screenCoords, STR_STAFF_STAT_GUESTS_ENTERTAINED, ft);
+                    break;
+                case StaffType::worker:
+                    ft = Formatter();
+                    ft.Add<uint32_t>(staff->staffTrainsDispatched);
+                    drawText(rt, screenCoords, STR_STAFF_STAT_TRAINS_DISPATCHED, ft);
                     break;
                 case StaffType::count:
                     break;

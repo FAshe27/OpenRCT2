@@ -41,6 +41,7 @@
 #include "../profiling/Profiling.h"
 #include "../ride/Ride.h"
 #include "../ride/RideData.h"
+#include "../ride/RideStaffing.h"
 #include "../ride/ShopItem.h"
 #include "../scenario/Scenario.h"
 #include "../ui/WindowManager.h"
@@ -1415,7 +1416,13 @@ namespace OpenRCT2
             case PeepState::fixing:
                 return { PeepActionDescriptionType::fixingRide, currentRide };
             case PeepState::headingToInspection:
+                if (is<Staff>() && as<Staff>()->isWorker())
+                {
+                    return { PeepActionDescriptionType::headingFor, currentRide };
+                }
                 return { PeepActionDescriptionType::headingToInspectRide, currentRide };
+            case PeepState::operating:
+                return { PeepActionDescriptionType::operatingRide, currentRide };
             case PeepState::inspecting:
                 return { PeepActionDescriptionType::inspectingRide, currentRide };
         }
@@ -2220,6 +2227,13 @@ namespace OpenRCT2
         guest->timeLost = 0;
 
         if (ride->status != RideStatus::open)
+        {
+            PeepReturnToCentreOfTile(guest);
+            return true;
+        }
+
+        // Workers: an unstaffed stall is shut - no sales until an operator is at post.
+        if (RideStaffing::IsStallClosed(*ride))
         {
             PeepReturnToCentreOfTile(guest);
             return true;

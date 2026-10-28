@@ -64,6 +64,7 @@
 #include "RideData.h"
 #include "RideEntry.h"
 #include "RideManager.hpp"
+#include "RideStaffing.h"
 #include "ShopItem.h"
 #include "Station.h"
 #include "TrackData.h"
@@ -584,7 +585,16 @@ namespace OpenRCT2
         }
         else
         {
-            ft.Add<StringId>(STR_OPEN);
+            // Workers: a stall with no operator at post is shut, even though the
+            // ride itself is switched on.
+            if (RideStaffing::IsStallClosed(*this))
+            {
+                ft.Add<StringId>(STR_CLOSED_NO_OPERATOR);
+            }
+            else
+            {
+                ft.Add<StringId>(STR_OPEN);
+            }
         }
     }
 

@@ -32,6 +32,7 @@ namespace OpenRCT2
         mechanic,
         security,
         entertainer,
+        worker,
     };
 
     const EnumMap<PeepAnimationType>& getAnimationsByPeepType(AnimationPeepType peepType);

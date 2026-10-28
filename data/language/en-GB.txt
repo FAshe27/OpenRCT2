@@ -3872,3 +3872,19 @@ STR_7078    :Pine green
 STR_7079    :Ruby
 STR_7080    :Deep blue
 STR_7081    :Silver
+STR_7082    :Operating {STRINGID}
+STR_7083    :Closed (no operator)
+STR_7084    :{WINDOW_COLOUR_2}Trains dispatched: {BLACK}{COMMA32}
+STR_7085    :Assignment
+STR_7086    :Unassigned
+STR_7087    :Workers
+STR_7088    :Worker
+STR_7089    :Hire Worker
+STR_7090    :Auto-assign workers
+STR_7091    :Assign every unassigned worker to the worst-staffed ride or stall
+STR_7092    :Unassigned workers: {INT32}
+STR_7093    :Operators: {INT32} / {INT32}
+STR_7094    :Operators: {INT32} / {INT32} ({INT32} on the way)
+STR_7095    :Assign the nearest unassigned worker to this ride
+STR_7096    :Workers
+STR_7097    :No unassigned workers are available

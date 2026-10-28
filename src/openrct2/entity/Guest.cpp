@@ -45,6 +45,7 @@
 #include "../ride/Ride.h"
 #include "../ride/RideData.h"
 #include "../ride/RideManager.hpp"
+#include "../ride/RideStaffing.h"
 #include "../ride/ShopItem.h"
 #include "../ride/Station.h"
 #include "../ride/Vehicle.h"
@@ -1902,6 +1903,12 @@ namespace OpenRCT2
 
             if (ride.getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
             {
+                // Workers: guests do not trek to a stall that is shut for lack of an operator.
+                if (RideStaffing::IsStallClosed(ride))
+                {
+                    choseNotToGoOnRide(ride, peepAtRide, true);
+                    return false;
+                }
                 return GuestShouldGoToShop(*this, ride, peepAtRide);
             }
 
@@ -2495,6 +2502,11 @@ namespace OpenRCT2
         Guest& guest, const Ride& ride, sfl::static_vector<uint8_t, Limits::kMaxTrainsPerRide>& car_array)
     {
         uint8_t chosen_train = RideStation::kNoTrain;
+
+        // Workers: while a ride is dispatch-blocked (no operators at post), guests
+        // keep waiting at the platform instead of boarding a train that cannot leave.
+        if (RideStaffing::IsDispatchBlocked(ride))
+            return false;
 
         if (ride.mode == RideMode::dodgems || ride.mode == RideMode::race)
         {

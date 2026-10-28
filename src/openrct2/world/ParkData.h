@@ -56,6 +56,7 @@ enum class ParkFlag : uint32_t
     noMoneyScenario = 17,               // Deprecated, originally used in scenario editor
     spritesInitialised = 18,            // After a scenario is loaded this prevents edits in the scenario editor
     sixFlagsDeprecated = 19,            // Not used anymore
+    workersEngaged = 20,                // Workers feature engaged: set on the first Worker hire, never cleared
 
     rct1Interest = 30,    // OpenRCT2 only
     unlockAllPrices = 31, // OpenRCT2 only
@@ -126,6 +127,7 @@ namespace OpenRCT2::Park
         Drawing::Colour staffHandymanColour;
         Drawing::Colour staffMechanicColour;
         Drawing::Colour staffSecurityColour;
+        Drawing::Colour staffWorkerColour;
 
         uint8_t peepWarningThrottle[16];
 

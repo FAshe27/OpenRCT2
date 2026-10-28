@@ -992,6 +992,16 @@ namespace OpenRCT2
                     readWriteColour(cs, park.staffHandymanColour, version);
                     readWriteColour(cs, park.staffMechanicColour, version);
                     readWriteColour(cs, park.staffSecurityColour, version);
+                    if (version >= kWorkersVersion)
+                    {
+                        readWriteColour(cs, park.staffWorkerColour, version);
+                    }
+                    else if (cs.getMode() == OrcaStream::Mode::reading)
+                    {
+                        // Pre-Workers saves: fall back to the hi-vis orange default
+                        // (the same default Park::Initialise gives new parks).
+                        park.staffWorkerColour = Drawing::Colour::lightOrange;
+                    }
                     cs.readWrite(park.samePriceThroughoutPark);
 
                     // Finances
