@@ -93,7 +93,11 @@ namespace OpenRCT2::RideStaffing
 
     bool IsDispatchBlocked(const Ride& ride)
     {
-        if (ride.status != RideStatus::open)
+        // Open and Testing alike: testing needs crew on site too (this
+        // supersedes v1's testing exemption). Only the zero-operator floor
+        // applies to Testing; capacity scaling and dwell stretch below keep
+        // their own testing early-outs.
+        if (ride.status != RideStatus::open && ride.status != RideStatus::testing)
             return false;
         const auto staffing = GetStaffing(ride);
         if (staffing.required <= 0 || staffing.atPost > 0)
@@ -101,11 +105,27 @@ namespace OpenRCT2::RideStaffing
         return IsEngaged();
     }
 
+    bool IsAutoAssignOnOpenEnabled()
+    {
+        // Stored inverted (bit set = disabled) so parks saved before the
+        // toggle existed read as enabled.
+        return !getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled);
+    }
+
     bool IsStallClosed(const Ride& ride)
     {
         const auto& rtd = ride.getRideTypeDescriptor();
         if (rtd.Classification != RideClassification::shopOrStall)
             return false;
+        if (GetRequiredOperators(ride) <= 0)
+            return false;
+        if (CountOperatorsAtPost(ride) > 0)
+            return false;
+        return IsEngaged();
+    }
+
+    bool HasZeroOperatorsAtPost(const Ride& ride)
+    {
         if (GetRequiredOperators(ride) <= 0)
             return false;
         if (CountOperatorsAtPost(ride) > 0)
@@ -248,5 +268,55 @@ namespace OpenRCT2::RideStaffing
             assignedCount++;
         }
         return assignedCount;
+    }
+
+    void SummonWorkers(Ride& ride)
+    {
+        const int32_t required = GetRequiredOperators(ride);
+        if (required <= 0)
+            return;
+
+        // Assigned crew start their trip now, under both toggle states:
+        // summoning an assigned worker is their assignment taking effect,
+        // not auto-assign. (Crew already travelling or at post are left be.)
+        for (auto* staff : EntityList<Staff>())
+        {
+            if (staff->isWorker() && staff->currentRide == ride.id
+                && (staff->state == PeepState::patrolling || staff->state == PeepState::falling))
+            {
+                staff->workerBeginHeadingToPost();
+            }
+        }
+
+        if (!IsAutoAssignOnOpenEnabled())
+            return;
+
+        // Top up from the unassigned pool with the AutoAssignAll selection
+        // rules, scoped to this one ride.
+        const auto postLocation = GetPostLocation(ride);
+        while (CountAssignedOperators(ride) < required)
+        {
+            Staff* bestWorker = nullptr;
+            int64_t bestDistance = 0;
+            for (auto* staff : EntityList<Staff>())
+            {
+                if (!staff->isWorker() || !staff->currentRide.IsNull())
+                    continue;
+                if (staff->state == PeepState::picked)
+                    continue;
+                const int64_t distance = DistanceSquared({ staff->x, staff->y }, postLocation);
+                if (bestWorker == nullptr || distance < bestDistance
+                    || (distance == bestDistance && staff->id.ToUnderlying() < bestWorker->id.ToUnderlying()))
+                {
+                    bestWorker = staff;
+                    bestDistance = distance;
+                }
+            }
+            if (bestWorker == nullptr)
+                break;
+
+            bestWorker->setWorkerAssignment(ride.id);
+            bestWorker->workerBeginHeadingToPost();
+        }
     }
 } // namespace OpenRCT2::RideStaffing

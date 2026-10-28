@@ -46,6 +46,7 @@
 #include "peep/StaffFireAction.h"
 #include "peep/StaffHireNewAction.h"
 #include "peep/StaffSetAssignmentAction.h"
+#include "peep/StaffSetAutoAssignOnOpenAction.h"
 #include "peep/StaffSetColourAction.h"
 #include "peep/StaffSetCostumeAction.h"
 #include "peep/StaffSetNameAction.h"
@@ -179,6 +180,7 @@ namespace OpenRCT2::GameActions
         REGISTER_ACTION(StaffSetColourAction);
         REGISTER_ACTION(StaffSetAssignmentAction);
         REGISTER_ACTION(StaffAutoAssignAction);
+        REGISTER_ACTION(StaffSetAutoAssignOnOpenAction);
         REGISTER_ACTION(StaffSetNameAction);
         REGISTER_ACTION(StaffSetOrdersAction);
         REGISTER_ACTION(StaffSetCostumeAction);

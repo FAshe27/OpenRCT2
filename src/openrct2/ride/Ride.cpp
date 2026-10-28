@@ -539,7 +539,15 @@ namespace OpenRCT2
         }
         else if (status == RideStatus::closed)
         {
-            if (!getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
+            if (pendingOpenStatus != RideStatus::closed)
+            {
+                // Workers opening gate: the ride is waiting for its minimum
+                // crew to reach their posts.
+                ft.Add<StringId>(STR_OPENING_WAITING_FOR_STAFF);
+                ft.Add<uint16_t>(static_cast<uint16_t>(RideStaffing::CountOperatorsAtPost(*this)));
+                ft.Add<uint16_t>(static_cast<uint16_t>(RideStaffing::GetRequiredOperators(*this)));
+            }
+            else if (!getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
             {
                 if (numRiders != 0)
                 {
@@ -870,6 +878,8 @@ namespace OpenRCT2
 
         updateMorningTestRun();
 
+        updatePendingOpen();
+
         // If ride is simulating but crashed, reset the vehicles
         if (status == RideStatus::simulating && flags.has(RideFlag::crashed))
         {
@@ -1029,6 +1039,59 @@ namespace OpenRCT2
             status = RideStatus::open;
             windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
         }
+    }
+
+    void Ride::updatePendingOpen()
+    {
+        if (pendingOpenStatus == RideStatus::closed)
+            return;
+
+        // Failsafe: any status change we did not make (the ride was opened,
+        // simulated or deleted out from under the request) ends it. The
+        // player closing the ride cancels explicitly in RideSetStatusAction.
+        if (status != RideStatus::closed)
+        {
+            pendingOpenStatus = RideStatus::closed;
+            return;
+        }
+
+        // If staffing no longer gates this ride (the feature disengaged, or
+        // the ride needs no operators), the request lapses: the ride simply
+        // stays closed, exactly as it was before the click.
+        if (!RideStaffing::IsEngaged() || RideStaffing::GetRequiredOperators(*this) <= 0)
+        {
+            pendingOpenStatus = RideStatus::closed;
+            return;
+        }
+
+        if (RideStaffing::CountOperatorsAtPost(*this) < RideStaffing::GetRequiredOperators(*this))
+            return;
+
+        // The minimum crew is at post: apply the requested status exactly as
+        // RideSetStatusAction would have on the original click. If the world
+        // changed so the ride can no longer open, the request is dropped and
+        // the ride stays closed.
+        const auto target = pendingOpenStatus;
+        const auto modeSwitchResult = target == RideStatus::testing ? test(false) : open(false);
+        if (!modeSwitchResult.Successful)
+        {
+            pendingOpenStatus = RideStatus::closed;
+            return;
+        }
+        const auto applyResult = target == RideStatus::testing ? test(true) : open(true);
+        if (!applyResult.Successful)
+        {
+            pendingOpenStatus = RideStatus::closed;
+            return;
+        }
+
+        pendingOpenStatus = RideStatus::closed;
+        raceWinner = EntityId::GetNull();
+        status = (target == RideStatus::open && tryArmMorningTestRun()) ? RideStatus::testing : target;
+        currentIssues = 0;
+        lastIssueTime = 0;
+        getMeasurement();
+        windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
     }
 
     /**

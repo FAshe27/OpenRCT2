@@ -1798,6 +1798,7 @@ enum : StringId
     // Workers (ride/stall operators)
     STR_OPERATING_RIDE = 7082,
     STR_CLOSED_NO_OPERATOR = 7083,
+    STR_OPENING_WAITING_FOR_STAFF = 7098,
 
     // Have to include resource strings (from scenarios and objects) for the time being now that language is partially working
     /* MAX_STR_COUNT = 32768 */ // MAX_STR_COUNT - upper limit for number of strings, not the current count strings

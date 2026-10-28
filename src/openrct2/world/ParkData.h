@@ -57,6 +57,8 @@ enum class ParkFlag : uint32_t
     spritesInitialised = 18,            // After a scenario is loaded this prevents edits in the scenario editor
     sixFlagsDeprecated = 19,            // Not used anymore
     workersEngaged = 20,                // Workers feature engaged: set on the first Worker hire, never cleared
+    workersAutoAssignDisabled = 21,     // Workers: opening-gate auto-assign turned off (set = disabled, so older saves read as
+                                        // enabled)
 
     rct1Interest = 30,    // OpenRCT2 only
     unlockAllPrices = 31, // OpenRCT2 only

@@ -102,6 +102,7 @@ namespace OpenRCT2
         setRideVisibility,
         setStaffAssignment,
         autoAssignStaff,
+        setStaffAutoAssignOnOpen,
         count,
     };
 }

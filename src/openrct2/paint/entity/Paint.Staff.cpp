@@ -23,6 +23,17 @@ void PaintStaff(PaintSession& session, const Staff& staff, int32_t orientation)
 {
     PROFILED_FUNCTION();
 
+    // Workers: a stall operator at post works behind the counter and is not
+    // drawn (they would otherwise stand frozen on the frontage path tile).
+    // Visibility is derived from state at paint time and never stored: the
+    // peep stays fully simulated, and leaving the post for any reason draws
+    // them again at the frontage tile. Skipping the paint also removes them
+    // from in-world picking, which reads the same paint pass.
+    if (staff.isAtStallPost())
+    {
+        return;
+    }
+
     if (session.rt.zoom_level > ZoomLevel{ 2 })
     {
         return;

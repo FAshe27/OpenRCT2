@@ -465,6 +465,16 @@ namespace OpenRCT2
         MorningTestState morningTestState{ MorningTestState::idle };
         uint32_t morningTestLastDayIndex{ std::numeric_limits<uint32_t>::max() };
 
+        // Workers opening gate: the status (open or testing) the player last
+        // requested for this ride while it waits for its minimum crew to
+        // reach their posts; RideStatus::closed means no request is pending.
+        // Runtime-only like the morning-test fields above - deliberately
+        // absent from ParkFile.cpp's field-by-field ride serialisation, so a
+        // ride saved mid-pending simply loads as a plain closed ride.
+        // (Value-initialised: the RideStatus enumerators are only defined
+        // below the struct, and enumerator 0 is closed.)
+        RideStatus pendingOpenStatus{};
+
     private:
         std::array<RideStation, Limits::kMaxStationsPerRide> stations{};
 
@@ -545,6 +555,10 @@ namespace OpenRCT2
         bool tryArmMorningTestRun();
         void cancelMorningTestRun();
         void updateMorningTestRun();
+
+        // Workers opening gate: promotes a pending open/testing request once
+        // the minimum crew is at post; polled from update().
+        void updatePendingOpen();
 
         RideMode getDefaultMode() const;
 

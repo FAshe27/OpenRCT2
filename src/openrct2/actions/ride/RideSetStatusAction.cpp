@@ -14,6 +14,7 @@
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
 #include "../../ride/Ride.h"
+#include "../../ride/RideStaffing.h"
 #include "../../ui/WindowManager.h"
 #include "../../world/Map.h"
 #include "../ResultWithMessage.h"
@@ -156,6 +157,8 @@ namespace OpenRCT2::GameActions
                 }
 
                 ride->cancelMorningTestRun();
+                // Closing cancels any pending open request (Workers gate).
+                ride->pendingOpenStatus = RideStatus::closed;
                 ride->status = RideStatus::closed;
                 ride->flags.unset(RideFlag::passStationNoStopping);
                 ride->raceWinner = EntityId::GetNull();
@@ -177,6 +180,7 @@ namespace OpenRCT2::GameActions
                 }
 
                 ride->cancelMorningTestRun();
+                ride->pendingOpenStatus = RideStatus::closed;
                 ride->status = _status;
                 ride->flags.unset(RideFlag::passStationNoStopping);
                 ride->raceWinner = EntityId::GetNull();
@@ -193,6 +197,26 @@ namespace OpenRCT2::GameActions
                 if (ride->status == _status)
                 {
                     return res;
+                }
+
+                // Workers opening gate: opening (or testing) a closed ride
+                // while staffing is engaged waits for the minimum crew to be
+                // at post. The request is remembered (runtime-only), the crew
+                // is summoned at once, and Ride::updatePendingOpen promotes
+                // the ride the moment the crew completes. With the full crew
+                // already at post the gate is transparent. Transitions from
+                // simulating, and open-to-testing switches, are not gated.
+                if (ride->status == RideStatus::closed && RideStaffing::IsEngaged())
+                {
+                    const int32_t required = RideStaffing::GetRequiredOperators(*ride);
+                    if (required > 0 && RideStaffing::CountOperatorsAtPost(*ride) < required)
+                    {
+                        ride->pendingOpenStatus = _status;
+                        RideStaffing::SummonWorkers(*ride);
+                        ride->windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+                        windowMgr->InvalidateByNumber(WindowClass::ride, _rideIndex.ToUnderlying());
+                        return res;
+                    }
                 }
 
                 if (ride->status == RideStatus::simulating)

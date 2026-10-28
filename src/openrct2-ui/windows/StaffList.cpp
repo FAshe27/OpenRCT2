@@ -23,6 +23,7 @@
 #include <openrct2/actions/peep/StaffAutoAssignAction.h>
 #include <openrct2/actions/peep/StaffFireAction.h>
 #include <openrct2/actions/peep/StaffHireNewAction.h>
+#include <openrct2/actions/peep/StaffSetAutoAssignOnOpenAction.h>
 #include <openrct2/actions/peep/StaffSetColourAction.h>
 #include <openrct2/config/Config.h>
 #include <openrct2/core/String.hpp>
@@ -77,6 +78,7 @@ namespace OpenRCT2::Ui::Windows
         WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON,
         WIDX_STAFF_LIST_MAP,
         WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON,
+        WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN,
     };
 
     static constexpr StringId kWindowTitle = STR_STAFF;
@@ -99,7 +101,8 @@ namespace OpenRCT2::Ui::Windows
         makeWidget({243, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_DEMOLISH),   STR_QUICK_FIRE_STAFF     ), // quick fire staff
         makeWidget({267, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_PATROL_BTN), STR_SHOW_PATROL_AREA_TIP ), // show staff patrol area tool
         makeWidget({291, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_MAP),        STR_SHOW_STAFF_ON_MAP_TIP), // show staff on map button
-        makeWidget({  3, 46}, {   118,      13},                             WidgetType::button,    WindowColour::secondary, STR_AUTO_ASSIGN_WORKERS, STR_AUTO_ASSIGN_WORKERS_TIP) // auto-assign workers button
+        makeWidget({  3, 46}, {   118,      13},                             WidgetType::button,    WindowColour::secondary, STR_AUTO_ASSIGN_WORKERS, STR_AUTO_ASSIGN_WORKERS_TIP), // auto-assign workers button
+        makeWidget({124, 46}, {   112,      13},                             WidgetType::checkbox, WindowColour::secondary, STR_AUTO_ASSIGN_ON_OPEN, STR_AUTO_ASSIGN_ON_OPEN_TIP)  // auto-assign on open toggle
     );
     // clang-format on
 
@@ -174,6 +177,15 @@ namespace OpenRCT2::Ui::Windows
                 {
                     auto autoAssignAction = GameActions::StaffAutoAssignAction();
                     GameActions::Execute(&autoAssignAction, getGameState());
+                    break;
+                }
+                case WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN:
+                {
+                    // The flag is stored inverted (set = disabled), so the new
+                    // enabled state is whatever the disabled bit currently says.
+                    auto toggleAction = GameActions::StaffSetAutoAssignOnOpenAction(
+                        getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled));
+                    GameActions::Execute(&toggleAction, getGameState());
                     break;
                 }
             }
@@ -270,12 +282,16 @@ namespace OpenRCT2::Ui::Windows
             {
                 widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setHidden();
                 widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON].setVisible();
+                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].setVisible();
             }
             else
             {
                 widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setVisible();
                 widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_BUTTON].setHidden();
+                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].setHidden();
             }
+            setWidgetPressed(
+                WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN, !getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled));
 
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].text = GetStaffNamingConvention(GetSelectedStaffType()).ActionHire;
             widgets[WIDX_STAFF_LIST_UNIFORM_COLOUR_PICKER].setHidden();

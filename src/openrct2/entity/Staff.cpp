@@ -14,6 +14,7 @@
 #include "../GameState.h"
 #include "../audio/Audio.h"
 #include "../core/DataSerialiser.h"
+#include "../core/Numerics.hpp"
 #include "../entity/EntityList.h"
 #include "../entity/EntityRegistry.h"
 #include "../localisation/StringIds.h"
@@ -25,8 +26,10 @@
 #include "../peep/GuestPathfinding.h"
 #include "../ride/RideData.h"
 #include "../ride/RideStaffing.h"
+#include "../ride/TrackData.h"
 #include "../ride/TrackIteration.h"
 #include "../ride/Vehicle.h"
+#include "../ride/ted/TrackElementDescriptor.h"
 #include "../scenario/Scenario.h"
 #include "../util/Util.h"
 #include "../world/Footpath.h"
@@ -1502,13 +1505,19 @@ namespace OpenRCT2
             return;
         }
 
-        if (state == PeepState::operating && ride->status == RideStatus::closed)
+        // A ride with a pending open request (Workers opening gate) is still
+        // RideStatus::closed, but its crew must gather and hold post so the
+        // request can promote; treat it as open for crew purposes.
+        const bool awaitingCrew = ride->pendingOpenStatus != RideStatus::closed;
+
+        if (state == PeepState::operating && ride->status == RideStatus::closed && !awaitingCrew)
         {
             workerLeavePost();
             return;
         }
 
-        if ((state == PeepState::patrolling || state == PeepState::falling) && ride->status != RideStatus::closed)
+        if ((state == PeepState::patrolling || state == PeepState::falling)
+            && (ride->status != RideStatus::closed || awaitingCrew))
         {
             workerBeginHeadingToPost();
         }
@@ -1568,6 +1577,30 @@ namespace OpenRCT2
 
     void Staff::workerLeavePost()
     {
+        // Stall operators stand on a path tile (the stall's frontage tile):
+        // there is nowhere to step off to, they resume patrolling where they stand.
+        auto* assignedRide = GetRide(currentRide);
+        if (assignedRide != nullptr && assignedRide->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
+        {
+            auto* tileElement = MapGetFirstElementAt(TileCoordsXY{ x, y });
+            if (tileElement != nullptr)
+            {
+                do
+                {
+                    if (tileElement->getType() == TileElementType::path && !tileElement->isGhost())
+                    {
+                        setState(PeepState::patrolling);
+                        subState = 0;
+                        resetPathfindGoal();
+                        setDestination({ x, y }, 2);
+                        return;
+                    }
+                } while (!(tileElement++)->isLastForTile());
+            }
+            // Not standing on a path (e.g. a v1 save caught them on the stall
+            // tile itself): fall through to the step-off below.
+        }
+
         // Step off the platform / stall tile onto an adjacent path tile, then resume patrolling.
         const auto currentTile = TileCoordsXY{ x, y };
         for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
@@ -1594,10 +1627,69 @@ namespace OpenRCT2
         setState(PeepState::falling);
     }
 
+    // The tile a stall operator stands at: a path tile on one of the stall's
+    // entrance-connection sides - the same sides RideShopConnected tests for
+    // path connectivity, and the tile guests stand on to buy (a guest's step
+    // toward the stall tile is what fires PeepInteractWithShop). Connection
+    // sides are tried first; if none of them fronts a path, any side does, so
+    // oddly-built stalls still get a post. A side qualifies when its tile
+    // holds a non-ghost path element at a height guests could interact from
+    // (the same height window performNextAction's element scan applies).
+    static std::optional<TileCoordsXY> GetStallPostTile(const Ride& ride)
+    {
+        const auto shopTile = TileCoordsXY(ride.getStation().start);
+        auto* tileElement = MapGetFirstElementAt(shopTile);
+        if (tileElement == nullptr)
+            return std::nullopt;
+
+        TrackElement* trackElement = nullptr;
+        do
+        {
+            if (tileElement->getType() == TileElementType::track && tileElement->asTrack()->getRideIndex() == ride.id)
+            {
+                trackElement = tileElement->asTrack();
+                break;
+            }
+        } while (!(tileElement++)->isLastForTile());
+        if (trackElement == nullptr)
+            return std::nullopt;
+
+        const auto& ted = TrackMetadata::GetTrackElementDescriptor(trackElement->getTrackType());
+        uint8_t connectionSides = ted.sequenceData.sequences[0].getEntranceConnectionSides();
+        connectionSides = Numerics::rol4(connectionSides, trackElement->getDirection());
+
+        for (int32_t pass = 0; pass < 2; pass++)
+        {
+            for (Direction side = 0; side < kNumOrthogonalDirections; side++)
+            {
+                const bool isConnectionSide = (connectionSides & (1 << side)) != 0;
+                if ((pass == 0) != isConnectionSide)
+                    continue;
+
+                const auto candidate = shopTile + TileDirectionDelta[side];
+                auto* element = MapGetFirstElementAt(candidate);
+                if (element == nullptr)
+                    continue;
+                do
+                {
+                    if (element->getType() == TileElementType::path && !element->isGhost())
+                    {
+                        const int32_t dz = trackElement->getBaseZ() - element->getBaseZ();
+                        if (dz >= -16 && dz <= 8)
+                            return candidate;
+                    }
+                } while (!(element++)->isLastForTile());
+            }
+        }
+        return std::nullopt;
+    }
+
     void Staff::updateWorkerHeadingToPost()
     {
         auto* ride = GetRide(currentRide);
-        if (ride == nullptr || ride->status == RideStatus::closed)
+        // A pending-open ride is still RideStatus::closed, but its crew is
+        // meant to be travelling to it (Workers opening gate).
+        if (ride == nullptr || (ride->status == RideStatus::closed && ride->pendingOpenStatus == RideStatus::closed))
         {
             setState(PeepState::falling);
             return;
@@ -1610,6 +1702,66 @@ namespace OpenRCT2
             mechanicTimeSinceCall = 0;
             resetPathfindGoal();
             subState = 2;
+        }
+
+        if (isShop)
+        {
+            // Stall operators take post on the stall's frontage path tile,
+            // never on the stall tile itself. v1 stepped the worker onto the
+            // stall tile, but staff bounce off shop tiles in
+            // PeepInteractWithShop while travelling, and the step-in state sat
+            // outside the per-tick block below, so the step-in moved once and
+            // then wedged - with the give-up timer inside the same block, it
+            // could never even time out. A path tile needs no special movement
+            // at all: normal pathfinding walks there, and arrival is the tile
+            // test below, re-checked every tick.
+            mechanicTimeSinceCall++;
+            if (mechanicTimeSinceCall > 2500)
+            {
+                // Could not reach the post; resume patrolling, the next think retries.
+                setState(PeepState::falling);
+                return;
+            }
+
+            if (!checkForPath())
+                return;
+
+            if (shouldWaitForLevelCrossing())
+                return;
+
+            const auto postTile = GetStallPostTile(*ride);
+            if (!postTile.has_value())
+            {
+                // No path fronts the stall, so nobody can staff it yet; fall
+                // back to patrolling and let the think retry if a path appears.
+                setState(PeepState::falling);
+                return;
+            }
+
+            if (TileCoordsXY{ x, y } == postTile.value())
+            {
+                // Face the stall across the counter and take post.
+                const auto shopTile = TileCoordsXY(ride->getStation().start);
+                for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
+                {
+                    if (postTile.value() + TileDirectionDelta[dir] == shopTile)
+                    {
+                        peepDirection = dir;
+                        orientation = peepDirection << 3;
+                        break;
+                    }
+                }
+                setState(PeepState::operating);
+                subState = 0;
+                return;
+            }
+
+            // Travel. Any other subState - including the step-in subState 4 a
+            // v1 save can carry - is normalised to plain travel, so an in-flight
+            // v1 stall worker recovers instead of wedging.
+            subState = 2;
+            performNextAction();
+            return;
         }
 
         if (subState <= 3)
@@ -1627,74 +1779,6 @@ namespace OpenRCT2
 
             if (shouldWaitForLevelCrossing())
                 return;
-
-            if (isShop)
-            {
-                const auto shopTile = TileCoordsXY(ride->getStation().start);
-                const auto currentTile = TileCoordsXY{ x, y };
-                if (currentTile == shopTile)
-                {
-                    subState = 4;
-                }
-                else if (subState == 2)
-                {
-                    // Staff bounce off shop tiles in PeepInteractWithShop, so the last step
-                    // onto the stall is a direct step-in (like a mechanic entering a station):
-                    // once an adjacent tile is reached, stop pathfinding and step across.
-                    bool adjacent = false;
-                    for (Direction dir = 0; dir < kNumOrthogonalDirections && !adjacent; dir++)
-                    {
-                        adjacent = (currentTile + TileDirectionDelta[dir]) == shopTile;
-                    }
-                    if (!adjacent)
-                    {
-                        performNextAction();
-                        return;
-                    }
-
-                    auto* tileElement = MapGetFirstElementAt(shopTile);
-                    if (tileElement != nullptr)
-                    {
-                        do
-                        {
-                            if (tileElement->getType() == TileElementType::track
-                                && tileElement->asTrack()->getRideIndex() == ride->id)
-                            {
-                                z = tileElement->baseHeight * 4;
-                                break;
-                            }
-                        } while (!(tileElement++)->isLastForTile());
-                    }
-                    setDestination(shopTile.toCoordsXY() + CoordsXY{ 16, 16 }, 2);
-                    subState = 4;
-                }
-
-                // Step-in (subState 4): walk straight onto the stall tile.
-                if (auto loc = updateAction(); loc.has_value())
-                {
-                    moveTo({ loc.value(), z });
-                    return;
-                }
-
-                // Arrived on the stall tile: face the counter front and take post.
-                auto* tileElement = MapGetFirstElementAt(shopTile);
-                if (tileElement != nullptr)
-                {
-                    do
-                    {
-                        if (tileElement->getType() == TileElementType::track
-                            && tileElement->asTrack()->getRideIndex() == ride->id)
-                        {
-                            peepDirection = DirectionReverse(tileElement->getDirection());
-                            orientation = peepDirection << 3;
-                            break;
-                        }
-                    } while (!(tileElement++)->isLastForTile());
-                }
-                setState(PeepState::operating);
-                subState = 0;
-                return;
-            }
 
             const auto [pathingResult, rideEntranceExitElement] = performNextAction();
             if (!(pathingResult & PATHING_RIDE_EXIT) && !(pathingResult & PATHING_RIDE_ENTRANCE))
@@ -1748,9 +1832,6 @@ namespace OpenRCT2
             // Falls through into the step-in below
         }
 
-        if (isShop)
-            return;
-
         int16_t delta_y = abs(getLocation().y - getDestination().y);
         if (auto loc = updateAction(); loc.has_value())
         {
@@ -1784,6 +1865,14 @@ namespace OpenRCT2
             moveTo({ loc.value(), z });
         }
         invalidate();
+    }
+
+    bool Staff::isAtStallPost() const
+    {
+        if (!isWorker() || state != PeepState::operating || currentRide.IsNull())
+            return false;
+        const auto* ride = GetRide(currentRide);
+        return ride != nullptr && ride->getRideTypeDescriptor().Classification == RideClassification::shopOrStall;
     }
 
     bool Staff::doWorkerPathFinding()
@@ -1868,7 +1957,19 @@ namespace OpenRCT2
             TileCoordsXYZ goalPos;
             if (ride->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
             {
-                goalPos = TileCoordsXYZ{ ride->getStation().getStart() };
+                // Head for the frontage post tile, not the stall tile: the
+                // stall tile is not on the path network, so aiming at it made
+                // the heuristic gradient fight the last step (and the shop
+                // bounce reversed the worker at the counter). Fall back to the
+                // stall tile only when no path fronts the stall at all.
+                if (const auto postTile = GetStallPostTile(*ride); postTile.has_value())
+                {
+                    goalPos = TileCoordsXYZ{ CoordsXYZ{ postTile->toCoordsXY(), ride->getStation().getBaseZ() } };
+                }
+                else
+                {
+                    goalPos = TileCoordsXYZ{ ride->getStation().getStart() };
+                }
             }
             else
             {

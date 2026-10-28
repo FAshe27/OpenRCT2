@@ -91,6 +91,8 @@ namespace OpenRCT2
         void serialise(DataSerialiser& stream);
 
         void setWorkerAssignment(RideId rideId);
+        bool workerBeginHeadingToPost();
+        bool isAtStallPost() const;
 
         void clearPatrolArea();
         void setPatrolArea(const CoordsXY& coords, bool value);
@@ -124,7 +126,6 @@ namespace OpenRCT2
         void tick128UpdateWorker();
         void updateWorkerHeadingToPost();
         void updateOperating();
-        bool workerBeginHeadingToPost();
         void workerLeavePost();
         bool doWorkerPathFinding();
         Direction workerDirectionPath(uint8_t validDirections, PathElement* pathElement);

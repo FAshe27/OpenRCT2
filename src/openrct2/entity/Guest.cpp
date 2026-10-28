@@ -1912,6 +1912,18 @@ namespace OpenRCT2
                 return GuestShouldGoToShop(*this, ride, peepAtRide);
             }
 
+            // Workers: guests do not newly choose a ride with nobody at post.
+            // It cannot dispatch or board, so a queue there can never move.
+            // A partially crewed ride (at least one operator at post) still
+            // attracts guests as normal, and guests already heading to or
+            // queueing for the ride are not re-routed - this is only the
+            // choice point, mirroring the stall rule above.
+            if (RideStaffing::HasZeroOperatorsAtPost(ride))
+            {
+                choseNotToGoOnRide(ride, peepAtRide, true);
+                return false;
+            }
+
             // This used to check !(flags & 2), but the function is only ever called with flags = 0, 1 or 6.
             // This means we can use the existing !(flags & 4) check.
             if (peepAtRide)
