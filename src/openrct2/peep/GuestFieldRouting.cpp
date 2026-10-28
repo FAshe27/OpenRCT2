@@ -19,6 +19,7 @@
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
+#include "GuestPathfinding.h"
 
 #include <deque>
 #include <unordered_map>
@@ -473,6 +474,312 @@ namespace OpenRCT2::PathFinding
             return hash;
         }
 
+        // --- Corridor lane scoring ---------------------------------------
+        //
+        // On a straight two- or three-wide corridor the field alone does
+        // not spread guests across the columns: guests enter from a feeder
+        // path in one column, and where a sideways step is downhill at all
+        // (the destination's cone gives the far column a lateral
+        // gradient), the fixed hash order picks it or not by luck, so the
+        // entry column stays dominant for the whole stretch. The scoring
+        // below treats the corridor as ONE road: when a guest has more
+        // than one downhill step, the candidates are scored by how close
+        // the column each step leads to sits to the guest's own lane -
+        // the very lane PeepMoveOneTile will walk them at, via
+        // GuestSpreadSignedLane - drawn across the full corridor width. A
+        // guest whose lane falls in the far column takes the sideways step
+        // as soon as the corridor widens; a guest whose lane is in the
+        // entry column goes straight; and because the column and the
+        // within-tile lane are the same preference at two scales, the two
+        // systems never fight.
+        //
+        // Hard limits, by design:
+        //  - Only strictly-downhill candidates are ever scored. The
+        //    candidate set is exactly the one the hash order chooses from
+        //    without this scoring; no equal or uphill step is admitted,
+        //    so the strict-decrease arrival guarantee is untouched.
+        //  - The corridor frame must prove itself: a contiguous row of
+        //    path tiles perpendicular to a travel axis, two or three
+        //    tiles wide, closed at both ends (no movement-graph step
+        //    leads out of the row sideways), every tile connected along
+        //    the axis and none sloping sideways. Junctions, plazas,
+        //    bends and anything wider fail the proof and keep the plain
+        //    hash order.
+        //  - Both travel axes are tried; if both frame the row (a small
+        //    square block can), the choice is ambiguous and the plain
+        //    hash order is kept.
+        // Everything here is a pure function of the peepId, the guest's
+        // position and heading, and the path network: no state is kept
+        // and no ScenarioRand is drawn.
+
+        // One downhill step candidate. A candidate set never exceeds the
+        // four compass directions.
+        struct FieldStepCandidate
+        {
+            Direction direction = 0;
+            TileCoordsXYZ next{};
+        };
+
+        constexpr size_t kMaxFieldStepCandidates = 4;
+
+        // Tests whether a cross-section tile belongs to a straight
+        // corridor row for the given travel axis: it must stay connected
+        // along the axis (either sense - a row near the corridor's end
+        // may only connect backwards) and must not slope sideways out of
+        // the row. Slopes ALONG the axis are fine: a corridor climbing a
+        // hill is flat across its width on every row.
+        bool CorridorTileFitsRow(
+            const PathElement* pathElement, Direction axisFwd, Direction axisRev, Direction plusDir, Direction minusDir)
+        {
+            if (pathElement->isSloped())
+            {
+                const Direction slopeDir = pathElement->getSlopeDirection();
+                if (slopeDir == plusDir || slopeDir == minusDir)
+                {
+                    return false;
+                }
+            }
+            return (FieldGetPermittedEdges(pathElement) & ((1 << axisFwd) | (1 << axisRev))) != 0;
+        }
+
+        // Extends a cross-section from loc in one lateral direction.
+        // Returns the number of corridor tiles found on that side (0 when
+        // the row simply ends there, which the closure test then
+        // verifies), or -1 when a neighbouring path tile disqualifies the
+        // row. The end tile and its element are returned for the closure
+        // test; they stay at loc / the loc element when the count is 0.
+        int32_t CorridorRowExtend(
+            const TileCoordsXYZ& loc, const PathElement* locElement, Direction dir, Direction axisFwd, Direction axisRev,
+            Direction plusDir, Direction minusDir, TileCoordsXYZ& outEnd, const PathElement*& outEndElement)
+        {
+            int32_t count = 0;
+            TileCoordsXYZ tile = loc;
+            outEnd = loc;
+            outEndElement = locElement;
+            while (count < 3)
+            {
+                const TileCoordsXYZ nextTile{ tile.x + TileDirectionDelta[dir].x, tile.y + TileDirectionDelta[dir].y, loc.z };
+                const PathElement* element = MapGetPathElementAt(nextTile);
+                if (element == nullptr || element->isQueue())
+                {
+                    break;
+                }
+                if (!CorridorTileFitsRow(element, axisFwd, axisRev, plusDir, minusDir))
+                {
+                    return -1;
+                }
+                tile = nextTile;
+                count++;
+                outEnd = tile;
+                outEndElement = element;
+            }
+            return count;
+        }
+
+        // A cross-section end is closed when no movement-graph step leads
+        // out of the row there: the step test fails, or lands somewhere
+        // that is not a graph node (a queue tile, or no path element at
+        // all). A step landing on another path element - even a stacked
+        // one at another height - means the row leaks into a junction or
+        // a crossing, so the row is not a simple corridor cross-section.
+        bool CorridorRowEndClosed(const TileCoordsXYZ& end, const PathElement* endElement, Direction outwardDir)
+        {
+            TileCoordsXYZ stepped;
+            if (!FieldStepTo(end, endElement, outwardDir, stepped))
+            {
+                return true;
+            }
+            const PathElement* steppedElement = MapGetPathElementAt(stepped);
+            return steppedElement == nullptr || steppedElement->isQueue();
+        }
+
+        // Attempts to frame the row through loc as a corridor cross-
+        // section perpendicular to one travel axis. On success returns
+        // true and fills outColumns (the column index each candidate
+        // leads to, parallel to candidates), outWidth and outSense (the
+        // travel direction along the axis the candidates imply). Any
+        // doubt returns false and the caller keeps the plain hash order.
+        bool CorridorFrameForAxis(
+            const Peep& peep, const TileCoordsXYZ& loc, const PathElement* pathElement, uint8_t permittedEdges,
+            bool travelAlongX, const FieldStepCandidate* candidates, size_t candidateCount, int32_t* outColumns,
+            int32_t& outWidth, Direction& outSense)
+        {
+            const Direction axisFwd = travelAlongX ? 0 : 1;
+            const Direction axisRev = DirectionReverse(axisFwd);
+            // The lateral direction a positive lane leans towards, as in
+            // PeepMoveOneTile: direction 1 on X-travel, direction 2 on
+            // Y-travel. Column indices increase in this direction.
+            const Direction plusDir = travelAlongX ? 1 : 2;
+            const Direction minusDir = DirectionReverse(plusDir);
+
+            // The guest's own tile must belong to such a row: connected
+            // along the axis, and not sloping sideways itself.
+            if ((permittedEdges & ((1 << axisFwd) | (1 << axisRev))) == 0)
+            {
+                return false;
+            }
+            if (pathElement->isSloped())
+            {
+                const Direction slopeDir = pathElement->getSlopeDirection();
+                if (slopeDir == plusDir || slopeDir == minusDir)
+                {
+                    return false;
+                }
+            }
+
+            TileCoordsXYZ minusEnd;
+            const PathElement* minusEndElement = nullptr;
+            const int32_t minusCount = CorridorRowExtend(
+                loc, pathElement, minusDir, axisFwd, axisRev, plusDir, minusDir, minusEnd, minusEndElement);
+            if (minusCount < 0)
+            {
+                return false;
+            }
+            TileCoordsXYZ plusEnd;
+            const PathElement* plusEndElement = nullptr;
+            const int32_t plusCount = CorridorRowExtend(
+                loc, pathElement, plusDir, axisFwd, axisRev, plusDir, minusDir, plusEnd, plusEndElement);
+            if (plusCount < 0)
+            {
+                return false;
+            }
+
+            const int32_t width = minusCount + 1 + plusCount;
+            if (width < 2 || width > 3)
+            {
+                return false;
+            }
+            if (!CorridorRowEndClosed(minusEnd, minusEndElement, minusDir)
+                || !CorridorRowEndClosed(plusEnd, plusEndElement, plusDir))
+            {
+                return false;
+            }
+
+            const int32_t columnHere = minusCount;
+
+            // The travel sense along the axis: when the candidates offer
+            // exactly one axis sense, that is the sense the guest is
+            // travelling (this also keeps the frame correct on the
+            // consultation right after a sideways step, when the guest's
+            // heading still points along the old lateral step). When both
+            // senses are on offer (a field ridge), the guest's current
+            // heading decides; anything else means this frame does not
+            // describe the choice at hand.
+            bool hasFwd = false;
+            bool hasRev = false;
+            for (size_t i = 0; i < candidateCount; i++)
+            {
+                if (candidates[i].direction == axisFwd)
+                {
+                    hasFwd = true;
+                }
+                else if (candidates[i].direction == axisRev)
+                {
+                    hasRev = true;
+                }
+            }
+            if (!hasFwd && !hasRev)
+            {
+                return false;
+            }
+            Direction sense;
+            if (hasFwd != hasRev)
+            {
+                sense = hasFwd ? axisFwd : axisRev;
+            }
+            else if (peep.peepDirection == axisFwd || peep.peepDirection == axisRev)
+            {
+                sense = peep.peepDirection;
+            }
+            else
+            {
+                return false;
+            }
+
+            // Every candidate must have a column in this frame: axis
+            // steps keep the guest's column; lateral steps move one
+            // column and must land exactly on the framed row tile, not on
+            // some other element stacked on the neighbouring tile.
+            for (size_t i = 0; i < candidateCount; i++)
+            {
+                const Direction d = candidates[i].direction;
+                if (d == plusDir)
+                {
+                    const TileCoordsXYZ expected{ loc.x + TileDirectionDelta[plusDir].x, loc.y + TileDirectionDelta[plusDir].y,
+                                                  loc.z };
+                    if (plusCount == 0 || candidates[i].next != expected)
+                    {
+                        return false;
+                    }
+                    outColumns[i] = columnHere + 1;
+                }
+                else if (d == minusDir)
+                {
+                    const TileCoordsXYZ expected{ loc.x + TileDirectionDelta[minusDir].x,
+                                                  loc.y + TileDirectionDelta[minusDir].y, loc.z };
+                    if (minusCount == 0 || candidates[i].next != expected)
+                    {
+                        return false;
+                    }
+                    outColumns[i] = columnHere - 1;
+                }
+                else
+                {
+                    outColumns[i] = columnHere;
+                }
+            }
+
+            outWidth = width;
+            outSense = sense;
+            return true;
+        }
+
+        // Scores the downhill candidates by corridor-lane fit and
+        // returns true when a corridor frame applies. outScores is
+        // parallel to candidates; lower is a better fit. Returns false -
+        // and the caller keeps the plain hash order - when neither travel
+        // axis frames the row, or when both do (ambiguous).
+        bool CorridorCandidateScores(
+            const Peep& peep, const TileCoordsXYZ& loc, const PathElement* pathElement, uint8_t permittedEdges,
+            const FieldStepCandidate* candidates, size_t candidateCount, int32_t* outScores)
+        {
+            int32_t columnsX[kMaxFieldStepCandidates];
+            int32_t columnsY[kMaxFieldStepCandidates];
+            int32_t widthX = 0;
+            int32_t widthY = 0;
+            Direction senseX = 0;
+            Direction senseY = 0;
+            const bool framedX = CorridorFrameForAxis(
+                peep, loc, pathElement, permittedEdges, true, candidates, candidateCount, columnsX, widthX, senseX);
+            const bool framedY = CorridorFrameForAxis(
+                peep, loc, pathElement, permittedEdges, false, candidates, candidateCount, columnsY, widthY, senseY);
+            if (framedX == framedY)
+            {
+                return false;
+            }
+            const int32_t* columns = framedX ? columnsX : columnsY;
+            const int32_t width = framedX ? widthX : widthY;
+            const Direction sense = framedX ? senseX : senseY;
+
+            // The guest's lane fraction - (16 + lane) of one 32-unit
+            // tile - drawn across the whole corridor width picks a point
+            // in the corridor; each candidate is scored by the distance
+            // from that point to the centre of the column the step leads
+            // to, so the columns fill in proportion to the lane
+            // distribution. (Scoring by the guest's settled foot position
+            // within the column instead would count the lane twice - once
+            // in the target, once in the position - and collapse
+            // three-wide corridors into their middle column.)
+            const int32_t lane = GuestSpreadSignedLane(peep.peepId, sense);
+            const int32_t target = width * (16 + lane);
+            for (size_t i = 0; i < candidateCount; i++)
+            {
+                const int32_t diff = 32 * columns[i] + 16 - target;
+                outScores[i] = diff < 0 ? -diff : diff;
+            }
+            return true;
+        }
+
     } // namespace
 
     void InvalidateGuestFields()
@@ -553,9 +860,11 @@ namespace OpenRCT2::PathFinding
             return false;
         }
 
-        bool found = false;
-        uint32_t bestRank = 0xFFFFFFFF;
-        Direction bestDirection = 0;
+        // The downhill candidates, in fixed direction order: the steps
+        // whose target node is strictly closer to the goal. This set is
+        // exactly the one the plain hash order has always chosen from.
+        FieldStepCandidate candidates[kMaxFieldStepCandidates];
+        size_t candidateCount = 0;
         for (Direction d : kAllDirections)
         {
             if (!(permittedEdges & (1 << d)))
@@ -578,20 +887,38 @@ namespace OpenRCT2::PathFinding
                 continue;
             }
 
-            const uint32_t rank = FieldPreferenceRank(peep.peepId, d);
-            if (!found || rank < bestRank)
-            {
-                found = true;
-                bestRank = rank;
-                bestDirection = d;
-            }
+            candidates[candidateCount] = FieldStepCandidate{ d, next };
+            candidateCount++;
         }
-        if (!found)
+        if (candidateCount == 0)
         {
             return false;
         }
 
-        outDirection = bestDirection;
+        // With several downhill steps, corridor-lane scoring gets first
+        // say where a corridor frame applies (see the corridor block
+        // above); the per-guest hash order breaks the remaining ties and
+        // decides everywhere else, exactly as before.
+        int32_t corridorScores[kMaxFieldStepCandidates] = {};
+        const bool useCorridorScores = candidateCount >= 2
+            && CorridorCandidateScores(peep, loc, pathElement, permittedEdges, candidates, candidateCount, corridorScores);
+
+        size_t best = 0;
+        uint32_t bestRank = FieldPreferenceRank(peep.peepId, candidates[0].direction);
+        for (size_t i = 1; i < candidateCount; i++)
+        {
+            const uint32_t rank = FieldPreferenceRank(peep.peepId, candidates[i].direction);
+            const bool better = useCorridorScores
+                ? (corridorScores[i] < corridorScores[best] || (corridorScores[i] == corridorScores[best] && rank < bestRank))
+                : (rank < bestRank);
+            if (better)
+            {
+                best = i;
+                bestRank = rank;
+            }
+        }
+
+        outDirection = candidates[best].direction;
         return true;
     }
 

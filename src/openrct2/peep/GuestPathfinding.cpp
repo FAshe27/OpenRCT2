@@ -320,6 +320,28 @@ namespace OpenRCT2::PathFinding
         return false;
     }
 
+    // The per-guest lane preference behind the lane spread in
+    // PeepMoveOneTile, exposed as GuestSpreadSignedLane (see the header).
+    // This is the same peepId-hash arithmetic as the lane block in
+    // PeepMoveOneTile - same constants, same mixes, same conversion - and
+    // the two MUST stay in step: if the lane tuning ever changes, change
+    // both. The lane block itself is deliberately untouched; this is a
+    // read-only seam for the field routing's corridor scoring, not a
+    // refactor of the lane system.
+    int32_t GuestSpreadSignedLane(uint32_t peepId, Direction direction)
+    {
+        constexpr int32_t kGuestSpreadLaneMax = 8;
+        constexpr int32_t kGuestSpreadKeepRightPercent = 65;
+        const uint32_t laneHash = peepId * 2654435761u;
+        const uint32_t laneMix = laneHash ^ (laneHash >> 16);
+        const int32_t laneMagnitude = static_cast<int32_t>(laneMix % static_cast<uint32_t>(kGuestSpreadLaneMax + 1));
+        const uint32_t sideHashRaw = peepId * 2246822519u;
+        const uint32_t sideMix = sideHashRaw ^ (sideHashRaw >> 16);
+        const bool laneKeepsRight = static_cast<int32_t>(sideMix % 100) < kGuestSpreadKeepRightPercent;
+        const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
+        return (direction == 2 || direction == 3) ? laneRight : -laneRight;
+    }
+
     /**
      *
      *  rct2: 0x0069524E
