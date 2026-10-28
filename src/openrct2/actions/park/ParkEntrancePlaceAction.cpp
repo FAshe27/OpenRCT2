@@ -15,6 +15,7 @@
 #include "../../core/Guard.hpp"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
+#include "../../peep/GuestFieldRouting.h"
 #include "../../world/ConstructionClearance.h"
 #include "../../world/Entrance.h"
 #include "../../world/Footpath.h"
@@ -197,6 +198,10 @@ namespace OpenRCT2::GameActions
                 MapAnimations::MarkTileForInvalidation(TileCoordsXY(entranceLoc));
             }
         }
+
+        // A new park entrance changes the path network, invalidating the
+        // guest distance fields.
+        PathFinding::InvalidateGuestFields();
 
         return res;
     }

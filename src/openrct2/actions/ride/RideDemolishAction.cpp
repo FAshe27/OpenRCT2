@@ -17,6 +17,7 @@
 #include "../../drawing/ScrollingText.h"
 #include "../../entity/EntityList.h"
 #include "../../management/NewsItem.h"
+#include "../../peep/GuestFieldRouting.h"
 #include "../../peep/RideUseSystem.h"
 #include "../../ride/Ride.h"
 #include "../../ride/RideData.h"
@@ -154,6 +155,9 @@ namespace OpenRCT2::GameActions
             res.position = { xy, TileElementHeight(xy) };
         }
 
+        // Demolishing a ride also removes its entrance, exit and any queue
+        // tiles, invalidating the guest distance fields.
+        PathFinding::InvalidateGuestFields();
         ride.remove();
         park.value = Park::CalculateParkValue(park, gameState);
 

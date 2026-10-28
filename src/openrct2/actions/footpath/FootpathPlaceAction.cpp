@@ -18,6 +18,7 @@
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
 #include "../../object/PathAdditionEntry.h"
+#include "../../peep/GuestFieldRouting.h"
 #include "../../ride/RideConstruction.h"
 #include "../../windows/Intent.h"
 #include "../../world/ConstructionClearance.h"
@@ -518,6 +519,7 @@ namespace OpenRCT2::GameActions
 
         FootpathUpdateQueueChains();
         MapInvalidateTileFull(_loc);
+        PathFinding::InvalidateGuestFields();
     }
 
     PathElement* FootpathPlaceAction::MapGetFootpathElementWithSlope(const CoordsXYZ& footpathPos, FootpathSlope slope) const

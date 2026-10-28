@@ -14,6 +14,7 @@
 #include "../../OpenRCT2.h"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
+#include "../../peep/GuestFieldRouting.h"
 #include "../../world/Footpath.h"
 #include "../../world/Location.hpp"
 #include "../../world/Map.h"
@@ -101,6 +102,7 @@ namespace OpenRCT2::GameActions
             MapInvalidateTileFull(_loc);
             TileElementRemove(footpathElement);
             FootpathUpdateQueueChains();
+            PathFinding::InvalidateGuestFields();
 
             // Remove the spawn point (if there is one in the current tile)
             gameState.peepSpawns.erase(

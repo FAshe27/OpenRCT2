@@ -10,6 +10,7 @@
 #include "RideEntranceExitRemoveAction.h"
 
 #include "../../Diagnostic.h"
+#include "../../peep/GuestFieldRouting.h"
 #include "../../ride/Ride.h"
 #include "../../world/Entrance.h"
 #include "../../world/Map.h"
@@ -121,6 +122,9 @@ namespace OpenRCT2::GameActions
         const bool isGhost = GetFlags().has(CommandFlag::ghost);
         if (!isGhost)
         {
+            // Moving an entrance changes the path network (guests may queue
+            // to a different spot), invalidating the guest distance fields.
+            PathFinding::InvalidateGuestFields();
             RideClearForConstruction(*ride);
             ride->removePeeps();
             InvalidateTestResults(*ride);

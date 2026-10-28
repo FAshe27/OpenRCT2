@@ -38,6 +38,7 @@
 #include "interface/WindowTypes.h"
 #include "management/Research.h"
 #include "network/Network.h"
+#include "peep/GuestFieldRouting.h"
 #include "platform/Platform.h"
 #include "rct12/CSStringConverter.h"
 #include "ride/Ride.h"
@@ -335,6 +336,10 @@ void GameFixSaveVars()
 
 void GameLoadInit()
 {
+    // Guest-spread change (personal fork): a loaded / new park clears the
+    // runtime guest distance fields (they are rebuilt lazily on first use).
+    PathFinding::ClearGuestFields();
+
     auto* context = GetContext();
 
     IGameStateSnapshots* snapshots = context->GetGameStateSnapshots();

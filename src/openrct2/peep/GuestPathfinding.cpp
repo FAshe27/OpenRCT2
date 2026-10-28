@@ -27,6 +27,7 @@
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
+#include "GuestFieldRouting.h"
 
 #include <cassert>
 #include <cstring>
@@ -1615,6 +1616,27 @@ namespace OpenRCT2::PathFinding
             std::fill(std::begin(peep.pathfindHistory), std::end(peep.pathfindHistory), nullPos);
 
             LogPathfinding(&peep, "New goal; clearing pf_history.");
+        }
+
+        /* Guest-spread change (personal fork): distance-field routing. For
+         * goal-directed guests, a shared per-destination distance field
+         * (GuestFieldRouting) can answer this junction outright: a permitted
+         * step to a strictly-closer node is guaranteed progress along a
+         * shortest route, so the heuristic search below - with its junction
+         * budget and its wide-tile path ends - does not need to run. When
+         * no field answer applies (the field is not built yet, the guest
+         * stands off the routed graph, or they are already on the
+         * destination's doorstep), execution falls through to the stock
+         * search unchanged. The goal bookkeeping above has already run, so
+         * peep.pathfindGoal stays correct for the callers that read it;
+         * the field attempt itself writes no peep state, consumes no
+         * pathfind history and draws no ScenarioRand. */
+        {
+            Direction fieldDirection = kInvalidDirection;
+            if (GuestFieldTryStep(peep, loc, goal, permittedEdges, fieldDirection))
+            {
+                return fieldDirection;
+            }
         }
 
         // Peep has tried all edges.
