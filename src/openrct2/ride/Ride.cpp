@@ -1094,6 +1094,36 @@ namespace OpenRCT2
         windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
     }
 
+    // Workers opening gate: spawn the ride's vehicles at the moment an
+    // open/testing request pends, so the trains stand at their stations for
+    // the whole pending wait - players staging stored trains on dummy
+    // stations rely on the trains simply being there. Only the
+    // vehicle-creation segment of the open/test transition runs: the status
+    // stays closed, so nothing can dispatch (the station update holds the
+    // depart flag clear for closed rides with no riders, and a train placed
+    // at a block brake can only roll into a block another train has left -
+    // the queue settles behind the station train and stands), no
+    // measurement is taken and the morning test is not armed. Promotion
+    // reuses these vehicles - changeStatusCreateVehicles skips creation
+    // while RideFlag::onTrack is set - and closing the pending ride removes
+    // them again through the stock RideClearForConstruction path. Vehicles
+    // are ordinary saved entities, so a park saved mid-pending loads as a
+    // normal closed ride with its trains parked. A spawn failure (the world
+    // changed between the action's query and here) is not fatal: the
+    // request still pends and promotion runs the full transition later.
+    bool Ride::createVehiclesForPendingOpen()
+    {
+        StationIndex stationIndex = {};
+        if (!changeStatusDoStationChecks(stationIndex).Successful)
+            return false;
+
+        CoordsXYE trackElement = {};
+        if (!changeStatusGetStartElement(stationIndex, trackElement).Successful)
+            return false;
+
+        return changeStatusCreateVehicles(true, trackElement, false).Successful;
+    }
+
     /**
      *
      *  rct2: 0x0069A3A2

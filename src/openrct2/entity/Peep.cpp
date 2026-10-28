@@ -513,6 +513,31 @@ namespace OpenRCT2
         return true;
     }
 
+    // The pace constants behind the walking-speed spread in
+    // Peep::updateWalkingAction (see the long comment there): a guest's
+    // step numerator over kGuestPaceDenominator ticks, 34..46 = 1.70..2.30
+    // units per tick = 0.85x..1.15x the stock step of 2.
+    static constexpr int32_t kGuestPaceDenominator = 20;
+    static constexpr int32_t kGuestPaceNumeratorMin = 34; // 1.70 units/tick = 0.85x stock
+    static constexpr int32_t kGuestPaceNumeratorMax = 46; // 2.30 units/tick = 1.15x stock
+
+    // The one home of the pace hash: a Knuth multiplicative hash of the
+    // peepId, folded once. Both the numerator and the per-guest phase in
+    // updateWalkingAction derive from this value, and no ScenarioRand is
+    // drawn anywhere in the pace system.
+    static uint32_t GuestPaceFoldedHash(uint32_t peepId)
+    {
+        const uint32_t paceHash = peepId * 2654435761u;
+        return paceHash ^ (paceHash >> 16);
+    }
+
+    int32_t Peep::getGuestPaceNumerator() const
+    {
+        const uint32_t paceFolded = GuestPaceFoldedHash(peepId);
+        const uint32_t paceSpan = static_cast<uint32_t>(kGuestPaceNumeratorMax - kGuestPaceNumeratorMin + 1);
+        return kGuestPaceNumeratorMin + static_cast<int32_t>(paceFolded % paceSpan);
+    }
+
     std::optional<CoordsXY> Peep::updateWalkingAction(const CoordsXY& differenceLoc, int16_t& xy_distance)
     {
         if (!isActionWalking())
@@ -569,13 +594,8 @@ namespace OpenRCT2
         int32_t stepLength = 2;
         if (is<Guest>() && state != PeepState::queuing)
         {
-            constexpr int32_t kGuestPaceDenominator = 20;
-            constexpr int32_t kGuestPaceNumeratorMin = 34; // 1.70 units/tick = 0.85x stock
-            constexpr int32_t kGuestPaceNumeratorMax = 46; // 2.30 units/tick = 1.15x stock
-            const uint32_t paceHash = peepId * 2654435761u;
-            const uint32_t paceFolded = paceHash ^ (paceHash >> 16);
-            const uint32_t paceSpan = static_cast<uint32_t>(kGuestPaceNumeratorMax - kGuestPaceNumeratorMin + 1);
-            const int32_t paceNumerator = kGuestPaceNumeratorMin + static_cast<int32_t>(paceFolded % paceSpan);
+            const uint32_t paceFolded = GuestPaceFoldedHash(peepId);
+            const int32_t paceNumerator = getGuestPaceNumerator();
             const uint64_t paceTick = static_cast<uint64_t>(getGameState().currentTicks)
                 + ((paceFolded >> 8) % static_cast<uint32_t>(kGuestPaceDenominator));
             const uint64_t paceDistance = (paceTick * static_cast<uint64_t>(paceNumerator))

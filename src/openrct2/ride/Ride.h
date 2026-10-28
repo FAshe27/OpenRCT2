@@ -560,6 +560,12 @@ namespace OpenRCT2
         // the minimum crew is at post; polled from update().
         void updatePendingOpen();
 
+        // Workers opening gate: materialises the ride's vehicles when an
+        // open/testing request pends, so the trains stand at their stations
+        // for the whole wait. Only the vehicle-creation segment of the
+        // open/test transition runs - the ride's status stays closed.
+        bool createVehiclesForPendingOpen();
+
         RideMode getDefaultMode() const;
 
         void setColourPreset(uint8_t trackColourPreset, uint8_t vehicleColourPreset);

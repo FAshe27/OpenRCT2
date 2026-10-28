@@ -3883,8 +3883,8 @@ STR_7089    :Hire Worker
 STR_7090    :Auto-assign workers
 STR_7091    :Assign every unassigned worker to the worst-staffed ride or stall
 STR_7092    :Unassigned workers: {INT32}
-STR_7093    :Operators: {INT32} / {INT32}
-STR_7094    :Operators: {INT32} / {INT32} ({INT32} on the way)
+STR_7093    :Operators: {INT32} / {INT32} ({INT32} minimum)
+STR_7094    :Operators: {INT32} / {INT32} ({INT32} minimum) ({INT32} on the way)
 STR_7095    :Assign the nearest unassigned worker to this ride
 STR_7096    :Workers
 STR_7097    :No unassigned workers are available

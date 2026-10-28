@@ -127,6 +127,9 @@ namespace OpenRCT2
         void updateWorkerHeadingToPost();
         void updateOperating();
         void workerLeavePost();
+        bool workerBeginEgress(const Ride& ride);
+        void updateWorkerEgress(const Ride* ride);
+        void workerStepOffToAdjacentPath();
         bool doWorkerPathFinding();
         Direction workerDirectionPath(uint8_t validDirections, PathElement* pathElement);
 

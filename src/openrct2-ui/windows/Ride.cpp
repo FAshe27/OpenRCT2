@@ -139,6 +139,7 @@ namespace OpenRCT2::Ui::Windows
         WIDX_SIMULATE_LIGHT,
         WIDX_TEST_LIGHT,
         WIDX_OPEN_LIGHT,
+        WIDX_MAIN_ASSIGN_OPERATOR,
 
         WIDX_VEHICLE_TYPE = 14,
         WIDX_VEHICLE_TYPE_DROPDOWN,
@@ -289,7 +290,8 @@ namespace OpenRCT2::Ui::Windows
         makeWidget({296,  48}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_CLOSE_BUTTON_0), STR_CLOSE_RIDE_TIP         ),
         makeWidget({296,  62}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_TEST_BUTTON_0),  STR_SIMULATE_RIDE_TIP      ),
         makeWidget({296,  62}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_TEST_BUTTON_0),  STR_TEST_RIDE_TIP          ),
-        makeWidget({296,  76}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_OPEN_BUTTON_0),  STR_OPEN_RIDE_TIP          )
+        makeWidget({296,  76}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_OPEN_BUTTON_0),  STR_OPEN_RIDE_TIP          ),
+        makeWidget({291, 142}, { 24,  24}, WidgetType::flatBtn,       WindowColour::secondary, 0xFFFFFFFF,                    STR_ASSIGN_OPERATOR_TIP    )
     );
 
     // 0x009ADDA8
@@ -1672,6 +1674,9 @@ namespace OpenRCT2::Ui::Windows
                 case WIDX_TAB_10:
                     setPage(widgetIndex - WIDX_TAB_1);
                     break;
+                case WIDX_MAIN_ASSIGN_OPERATOR:
+                    AssignNearestWorker();
+                    break;
                 case WIDX_CONSTRUCTION:
                 {
                     auto ride = GetRide(rideId);
@@ -1745,6 +1750,18 @@ namespace OpenRCT2::Ui::Windows
             }
         }
 
+        // Rides that need operators but have no Maintenance tab (stalls and
+        // shops, mini golf) show their Operators line and assign button on
+        // the main page instead. Facilities need no operators and get
+        // neither, and rides with a Maintenance tab keep everything there.
+        bool MainShowsOperatorsRow(const Ride& ride) const
+        {
+            if (RideStaffing::GetRequiredOperators(ride) <= 0)
+                return false;
+            const auto& rtd = ride.getRideTypeDescriptor();
+            return rtd.flags.has(RtdFlag::isShopOrFacility) || rtd.specialType == RtdSpecialType::miniGolf;
+        }
+
         void MainResize()
         {
             int32_t newMinHeight = 180;
@@ -1766,6 +1783,13 @@ namespace OpenRCT2::Ui::Windows
                         newMinHeight += 14;
                     }
                 }
+            }
+
+            auto ride = GetRide(rideId);
+            if (ride != nullptr && MainShowsOperatorsRow(*ride))
+            {
+                // Room for the Operators row under the status strip.
+                newMinHeight += 26;
             }
 
             flags |= WindowFlag::resizable;
@@ -2451,6 +2475,38 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_VIEW_DROPDOWN].right = width - 61;
             widgets[WIDX_VIEW_DROPDOWN].left = width - 71;
 
+            // Operators row for rides without a Maintenance tab: anchored to
+            // the bottom-right like the maintenance page's button, with the
+            // status strip and viewport moved up to make room for it.
+            const bool showOperatorsRow = MainShowsOperatorsRow(*ride);
+            widgets[WIDX_MAIN_ASSIGN_OPERATOR].left = width - 29;
+            widgets[WIDX_MAIN_ASSIGN_OPERATOR].right = width - 5;
+            widgets[WIDX_MAIN_ASSIGN_OPERATOR].top = height - 27;
+            widgets[WIDX_MAIN_ASSIGN_OPERATOR].bottom = height - 3;
+            widgets[WIDX_MAIN_ASSIGN_OPERATOR].setHidden(!showOperatorsRow);
+            if (showOperatorsRow)
+            {
+                widgets[WIDX_VIEWPORT].bottom = height - 31;
+                widgets[WIDX_STATUS].top = height - 29;
+                widgets[WIDX_STATUS].bottom = height - 19;
+
+                // Same enable rule as the maintenance page's button.
+                const auto staffing = RideStaffing::GetStaffing(*ride);
+                bool hasUnassignedWorker = false;
+                if (staffing.assigned < staffing.required)
+                {
+                    for (auto* staff : EntityList<Staff>())
+                    {
+                        if (staff->isWorker() && staff->currentRide.IsNull())
+                        {
+                            hasUnassignedWorker = true;
+                            break;
+                        }
+                    }
+                }
+                setWidgetDisabled(WIDX_MAIN_ASSIGN_OPERATOR, !hasUnassignedWorker);
+            }
+
             WindowAlignTabs(this, WIDX_TAB_1, WIDX_TAB_10);
 
             if (ThemeGetFlags() & UITHEME_FLAG_USE_LIGHTS_RIDE)
@@ -2681,6 +2737,32 @@ namespace OpenRCT2::Ui::Windows
             drawTextEllipsised(
                 rt, windowPos + ScreenCoordsXY{ (widget->left + widget->right) / 2, widget->top }, widget->width() - 1,
                 rideStatus, ft, { TextAlignment::centre });
+
+            // Operators row for rides without a Maintenance tab: the same
+            // line and worker button as the maintenance page shows.
+            if (MainShowsOperatorsRow(*ride))
+            {
+                const auto staffing = RideStaffing::GetStaffing(*ride);
+                auto operatorsFt = Formatter();
+                operatorsFt.Add<int32_t>(staffing.atPost);
+                operatorsFt.Add<int32_t>(staffing.required);
+                operatorsFt.Add<int32_t>(staffing.required);
+                StringId operatorsString = STR_RIDE_OPERATORS;
+                if (staffing.assigned > staffing.atPost)
+                {
+                    operatorsString = STR_RIDE_OPERATORS_ENROUTE;
+                    operatorsFt.Add<int32_t>(staffing.assigned - staffing.atPost);
+                }
+                drawText(rt, windowPos + ScreenCoordsXY{ 4, height - 15 }, operatorsString, operatorsFt);
+
+                widget = &widgets[WIDX_MAIN_ASSIGN_OPERATOR];
+                if (widget->isVisible())
+                {
+                    auto screenCoords = windowPos + ScreenCoordsXY{ widget->left, widget->top };
+                    auto image = ImageId(SPR_MECHANIC, Drawing::Colour::black, getGameState().park.staffWorkerColour);
+                    GfxDrawSprite(rt, image, screenCoords);
+                }
+            }
         }
 
 #pragma endregion
@@ -4248,6 +4330,7 @@ namespace OpenRCT2::Ui::Windows
                 {
                     auto operatorsFt = Formatter();
                     operatorsFt.Add<int32_t>(staffing.atPost);
+                    operatorsFt.Add<int32_t>(staffing.required);
                     operatorsFt.Add<int32_t>(staffing.required);
                     StringId operatorsString = STR_RIDE_OPERATORS;
                     if (staffing.assigned > staffing.atPost)

@@ -21,6 +21,7 @@
 #include "../world/tile_element/TrackElement.h"
 #include "GuestPathfinding.h"
 
+#include <cstdlib>
 #include <deque>
 #include <unordered_map>
 #include <vector>
@@ -780,6 +781,98 @@ namespace OpenRCT2::PathFinding
             return true;
         }
 
+        // The field distance recorded for a node, when the field covers it.
+        bool FieldDistanceAt(const FieldData& field, const TileCoordsXYZ& node, uint32_t& outDistance)
+        {
+            const auto it = field.distance.find(PackNode(node));
+            if (it == field.distance.end())
+            {
+                return false;
+            }
+            outDistance = it->second;
+            return true;
+        }
+
+        // --- Lane changes --------------------------------------------------
+        //
+        // The movement-layer companion to the field, built for the case the
+        // field and corridor scoring structurally cannot reach: on a
+        // straight multi-wide path a goal-directed guest's column is
+        // conserved from entry, because the only lateral step is exactly
+        // equal-distance and the downhill filter deletes it before any
+        // choice exists. GuestSpreadTryLaneChange (below) runs inside
+        // PeepMoveOneTile - the one funnel every guest chooser shares - and
+        // may substitute a sideways step for a straight one when the tile
+        // ahead is blocked or clearly more crowded than the tile beside.
+        // It is a behavioural response to present-tense congestion, not a
+        // routing change: it keeps no memory, allocates nothing, draws no
+        // ScenarioRand, and for field-routed guests it admits only
+        // equal-distance steps, so the field's strict-decrease arrival
+        // proof survives (see the termination argument at gate 7 below).
+
+        // Cooldown windows are this many ticks wide (about four tile-steps
+        // at the pace spread's 1.7-2.3 units/tick). At most one lane change
+        // per guest per window is possible by construction: the window
+        // index is the gate input, so within a window the answer is
+        // constant, and between any two crossings a guest makes several
+        // ordinary steps.
+        constexpr uint32_t kLaneChangeWindowTicks = 64;
+
+        // Occupancy counting stops after this many entities examined per
+        // tile bucket: a tile holding more than that is "crowded" for
+        // every trigger purpose long before the cap matters.
+        constexpr int32_t kLaneChangeMaxExamined = 24;
+
+        // Whether this guest's cooldown window is open: a pure hash of
+        // (peepId, window index) in the lane hash's own arithmetic style
+        // (Knuth multiplicative + fold) - the determinism pattern the pace
+        // block uses for (peepId, currentTicks). Roughly half of all
+        // windows are open; the guest cannot influence either input.
+        bool LaneChangeWindowOpen(uint32_t peepId, uint32_t windowIndex)
+        {
+            uint32_t hash = peepId * 2654435761u;
+            hash ^= (windowIndex + 1u) * 2246822519u;
+            hash ^= hash >> 16;
+            return (hash & 1u) != 0;
+        }
+
+        // Present-tense occupancy of one path tile, read from the entity
+        // spatial index: how many guests stand on it, and whether any of
+        // them blocks the guest asking - stopped (any non-walking state:
+        // a watcher at the path edge, a bench sitter, a guest paused
+        // mid-errand) or slower, by the shared pace numerator, which makes
+        // "slower" an arithmetic comparison rather than a measurement.
+        struct LaneChangeOccupancy
+        {
+            int32_t guests = 0;
+            bool hasBlocker = false;
+        };
+
+        LaneChangeOccupancy LaneChangeTileOccupancy(const TileCoordsXYZ& tile, const Peep& self, int32_t selfPace)
+        {
+            LaneChangeOccupancy occupancy;
+            const auto& bucket = getGameState().entities.getEntityTileList(tile.toCoordsXY().toTileCentre());
+            int32_t examined = 0;
+            for (const EntityId entityId : bucket)
+            {
+                if (examined++ >= kLaneChangeMaxExamined)
+                {
+                    break;
+                }
+                const auto* other = getGameState().entities.tryGetEntity<Guest>(entityId);
+                if (other == nullptr || other == &self)
+                {
+                    continue;
+                }
+                occupancy.guests++;
+                if (other->state != PeepState::walking || other->getGuestPaceNumerator() < selfPace)
+                {
+                    occupancy.hasBlocker = true;
+                }
+            }
+            return occupancy;
+        }
+
     } // namespace
 
     void InvalidateGuestFields()
@@ -920,6 +1013,197 @@ namespace OpenRCT2::PathFinding
 
         outDirection = candidates[best].direction;
         return true;
+    }
+
+    Direction GuestSpreadTryLaneChange(Direction direction, Peep& peep)
+    {
+        // Gate 1 - population: walking guests only. This one test excludes
+        // staff (they never call PeepMoveOneTile, and fail the cast anyway),
+        // queuing and queue-front guests (the state is not walking), guests
+        // on, entering or leaving rides (waypoints, not free steps), and
+        // every stationary state (buying, watching, sitting).
+        auto* guest = peep.as<Guest>();
+        if (guest == nullptr || peep.state != PeepState::walking)
+        {
+            return direction;
+        }
+
+        // Gate 2 - straight steps only: the behaviour substitutes a sideways
+        // step for a straight one, never for a turn, a reversal or a
+        // junction re-aim.
+        const Direction heading = peep.peepDirection;
+        if (direction != heading)
+        {
+            return direction;
+        }
+
+        // Gate 3 - cooldown window (the determinism gate; see
+        // LaneChangeWindowOpen above).
+        const uint32_t windowIndex = getGameState().currentTicks / kLaneChangeWindowTicks;
+        if (!LaneChangeWindowOpen(peep.peepId, windowIndex))
+        {
+            return direction;
+        }
+
+        const TileCoordsXYZ loc{ peep.nextLoc };
+        if (!NodePackable(loc))
+        {
+            return direction;
+        }
+        const PathElement* pathElement = MapGetPathElementAt(loc);
+        if (pathElement == nullptr || pathElement->isQueue())
+        {
+            return direction;
+        }
+        const int32_t permittedEdges = FieldGetPermittedEdges(pathElement);
+
+        // Gate 4 - straight-through tile: the guest is passing through this
+        // tile, not standing at a dead end, a doorstep or a junction arm
+        // they are turning out of.
+        if (!(permittedEdges & (1 << heading)) || !(permittedEdges & (1 << DirectionReverse(heading))))
+        {
+            return direction;
+        }
+
+        // Goal-directedness, tested exactly as GuestFieldTryStep's gate
+        // tests it: entering or leaving the park, the leaving-park flag, or
+        // a heading ride. Aimless guests skip the field rule (gate 7) -
+        // they have no route to protect - but every other gate applies.
+        const bool goalDirected = guest->outsideOfPark
+            ? (peep.state == PeepState::enteringPark || peep.state == PeepState::leavingPark)
+            : (guest->peepFlags.has(PeepFlag::leavingPark) || !guest->guestHeadingToRideId.IsNull());
+        const TileCoordsXYZ goal{ peep.pathfindGoal };
+
+        // Gate 5 - doorway guard: the originally chosen step must itself be
+        // an ordinary path step onto a non-queue node. A step onto a queue
+        // tail, a ride entrance/exit element or a shop tile finds no path
+        // node (or a queue node) and is never diverted; and a heading guest
+        // within one tile of their goal is on the doorstep, where the stock
+        // interaction machinery owns the approach.
+        TileCoordsXYZ aheadNode;
+        if (!FieldStepTo(loc, pathElement, heading, aheadNode))
+        {
+            return direction;
+        }
+        const PathElement* aheadElement = MapGetPathElementAt(aheadNode);
+        if (aheadElement == nullptr || aheadElement->isQueue())
+        {
+            return direction;
+        }
+        if (goalDirected && std::abs(goal.x - loc.x) + std::abs(goal.y - loc.y) <= 1)
+        {
+            return direction;
+        }
+
+        // Gate 7 (set up here, applied per lateral below) - the field rule.
+        // A field-routed guest may cross only onto a node of exactly equal
+        // field distance, and only while their own distance is at least 2
+        // (mirroring GuestFieldTryStep's distance-0 hand-over: the last
+        // steps of a route belong to the stock code). Termination: field
+        // consultations strictly decrease the distance; a crossing
+        // preserves it but is bounded - at most one per cooldown window,
+        // the trigger must re-fire from the freer column (an immediate
+        // reverse crossing needs the crowd asymmetry to have physically
+        // inverted), and the equal-distance level set at any tile is at
+        // most the corridor's width - so route length stays within
+        // dist + one crossing per window of route tiles. A guest whose
+        // goal has no usable field (unbuilt, over budget, off the routed
+        // graph) is treated as a stock-search guest: gates 5's doorstep
+        // rule is their protection, and a one-tile detour is corrected by
+        // the next consultation, as stock disturbances already are.
+        const FieldData* field = nullptr;
+        uint32_t distanceHere = 0;
+        if (goalDirected)
+        {
+            field = GetFieldForGoal(goal);
+            if (field != nullptr && !FieldDistanceAt(*field, loc, distanceHere))
+            {
+                field = nullptr;
+            }
+            if (field != nullptr && distanceHere < 2)
+            {
+                return direction;
+            }
+        }
+
+        // The ahead tile's occupancy is shared by both lateral tests.
+        const int32_t selfPace = peep.getGuestPaceNumerator();
+        const LaneChangeOccupancy ahead = LaneChangeTileOccupancy(aheadNode, peep, selfPace);
+
+        // Gates 6 and 8, per lateral: the movement graph's own step test
+        // (slope arrival heights, ghost elements skipped, queue nodes
+        // refused by the caller-side check, one-way and 'no entry'
+        // correctness from the banner-cleared edge mask), then the
+        // trigger. An equilibration drift gate belongs here in the future
+        // if sparse straights ever need it: one more trigger alternative,
+        // deliberately not shipped - the defect is density-driven, and an
+        // untriggered crossing reads as weaving.
+        Direction bestDirection = direction;
+        int32_t bestGuests = 0;
+        bool found = false;
+        const Direction laterals[2] = { static_cast<Direction>((heading + 1) & 3), static_cast<Direction>((heading + 3) & 3) };
+        for (const Direction lateral : laterals)
+        {
+            if (!(permittedEdges & (1 << lateral)))
+            {
+                continue;
+            }
+            TileCoordsXYZ sideNode;
+            if (!FieldStepTo(loc, pathElement, lateral, sideNode))
+            {
+                continue;
+            }
+            const PathElement* sideElement = MapGetPathElementAt(sideNode);
+            if (sideElement == nullptr || sideElement->isQueue())
+            {
+                continue;
+            }
+            if (field != nullptr)
+            {
+                uint32_t sideDistance = 0;
+                if (!FieldDistanceAt(*field, sideNode, sideDistance) || sideDistance != distanceHere)
+                {
+                    continue;
+                }
+            }
+
+            const LaneChangeOccupancy side = LaneChangeTileOccupancy(sideNode, peep, selfPace);
+            // BLOCKER: someone stopped or slower ahead, and the side tile
+            // is strictly freer. CROWD: a bunch ahead (at least 3) and the
+            // side tile clearer by at least 2 - the gap requirement stops
+            // sideways shuffling between near-equal crowds.
+            const bool fires = (ahead.hasBlocker && side.guests < ahead.guests)
+                || (ahead.guests >= 3 && ahead.guests - side.guests >= 2);
+            if (!fires)
+            {
+                continue;
+            }
+
+            // The freer side wins. Ties break towards the side of the
+            // guest's own lane - the side their body already leans to, so
+            // the crossing is the shorter visual step (the lane convention
+            // of PeepMoveOneTile: a positive lane leans towards direction 1
+            // on X-travel, direction 2 on Y-travel).
+            bool take = !found || side.guests < bestGuests;
+            if (found && side.guests == bestGuests)
+            {
+                const int32_t lane = GuestSpreadSignedLane(peep.peepId, heading);
+                const Direction positiveSide = (heading == 0 || heading == 2) ? 1 : 2;
+                const Direction preferred = lane > 0 ? positiveSide : DirectionReverse(positiveSide);
+                if (lane != 0 && lateral == preferred && bestDirection != preferred)
+                {
+                    take = true;
+                }
+            }
+            if (take)
+            {
+                found = true;
+                bestDirection = lateral;
+                bestGuests = side.guests;
+            }
+        }
+
+        return found ? bestDirection : direction;
     }
 
 } // namespace OpenRCT2::PathFinding

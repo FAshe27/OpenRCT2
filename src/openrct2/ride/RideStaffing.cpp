@@ -202,6 +202,19 @@ namespace OpenRCT2::RideStaffing
             const int64_t dy = static_cast<int64_t>(a.y) - b.y;
             return dx * dx + dy * dy;
         }
+
+        // How many more operators system assignment may still give a ride:
+        // its requirement minus everyone already assigned to it.
+        // CountAssignedOperators counts every worker whose currentRide is
+        // this ride, in any state - at post, on the way, or patrolling with
+        // the assignment in hand - so this is the assigned + en-route total
+        // the auto-assign cap is measured against. Manual assignment (the
+        // staff-window dropdown, the ride-window button) does not consult
+        // this and may exceed the requirement deliberately.
+        int32_t OperatorShortfall(const Ride& ride)
+        {
+            return std::max(0, GetRequiredOperators(ride) - CountAssignedOperators(ride));
+        }
     } // namespace
 
     int32_t AutoAssignAll()
@@ -224,7 +237,7 @@ namespace OpenRCT2::RideStaffing
                 if (ride.status == RideStatus::closed)
                     continue;
                 const auto staffing = GetStaffing(ride);
-                if (staffing.required <= 0 || staffing.assigned >= staffing.required)
+                if (staffing.required <= 0 || OperatorShortfall(ride) <= 0)
                     continue;
                 targets.push_back(
                     { ride.id, ride.getRideTypeDescriptor().Classification == RideClassification::shopOrStall,
@@ -292,9 +305,14 @@ namespace OpenRCT2::RideStaffing
             return;
 
         // Top up from the unassigned pool with the AutoAssignAll selection
-        // rules, scoped to this one ride.
+        // rules, scoped to this one ride. The number to add is fixed up
+        // front from the assigned + en-route count, so the top-up is a
+        // no-op once the ride has its requirement and no pattern of repeat
+        // calls (the gate re-runs this on every open/test click while the
+        // ride waits) can ever push the ride past it.
         const auto postLocation = GetPostLocation(ride);
-        while (CountAssignedOperators(ride) < required)
+        const int32_t shortfall = OperatorShortfall(ride);
+        for (int32_t i = 0; i < shortfall; i++)
         {
             Staff* bestWorker = nullptr;
             int64_t bestDistance = 0;

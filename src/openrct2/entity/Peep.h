@@ -455,6 +455,14 @@ namespace OpenRCT2
         void setDestination(const CoordsXY& coords, int32_t tolerance);
         [[nodiscard]] CoordsXY getDestination() const;
 
+        // The guest pace numerator (over a denominator of 20 ticks) behind
+        // the walking-speed spread in updateWalkingAction: a pure function
+        // of peepId, in the range 34..46 (0.85x..1.15x stock). Exposed so
+        // other per-guest behaviours - the lane-change helper in the
+        // distance-field routing - can compare two guests' paces with the
+        // same arithmetic instead of growing a second copy of the hash.
+        [[nodiscard]] int32_t getGuestPaceNumerator() const;
+
         void serialise(class DataSerialiser& stream);
 
         // TODO: Make these private again when done refactoring

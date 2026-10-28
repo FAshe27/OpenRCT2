@@ -865,8 +865,12 @@ namespace OpenRCT2::Ui::Windows
 
             for (auto& ride : RideManager(getGameState()))
             {
-                if (ride.status == RideStatus::closed)
-                    continue;
+                // Every ride or stall that needs operators is listed, whatever
+                // its status: a newly built ride is closed, and a ride waiting
+                // on the opening gate (or an unstaffed stall) stays closed
+                // until its crew is assigned - which is exactly when this
+                // dropdown is needed. Filtering closed rides out made the
+                // newest ride invisible and stalls unassignable by hand.
                 const auto staffing = RideStaffing::GetStaffing(ride);
                 if (staffing.required <= 0)
                     continue;

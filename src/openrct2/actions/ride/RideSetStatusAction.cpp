@@ -212,6 +212,9 @@ namespace OpenRCT2::GameActions
                     if (required > 0 && RideStaffing::CountOperatorsAtPost(*ride) < required)
                     {
                         ride->pendingOpenStatus = _status;
+                        // The trains materialise now, while the request
+                        // waits; dispatch stays gated on promotion.
+                        ride->createVehiclesForPendingOpen();
                         RideStaffing::SummonWorkers(*ride);
                         ride->windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
                         windowMgr->InvalidateByNumber(WindowClass::ride, _rideIndex.ToUnderlying());

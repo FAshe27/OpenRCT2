@@ -35,6 +35,7 @@
 #include "../world/Footpath.h"
 #include "../world/Map.h"
 #include "../world/Scenery.h"
+#include "../world/TileElementsView.h"
 #include "../world/Wall.h"
 #include "../world/tile_element/EntranceElement.h"
 #include "../world/tile_element/PathElement.h"
@@ -1483,6 +1484,13 @@ namespace OpenRCT2
     // ride's staffing (see RideStaffing). Workers use stock staff pathfinding throughout;
     // the guest distance fields are never consulted for staff.
 
+    // The subState a worker rides in while walking out of a closed ride
+    // through its exit (workerBeginEgress / updateWorkerEgress). The travel
+    // subStates are 0/2/3 and the platform step-in is 4, so 5 is free; it
+    // is a runtime distinction inside the already-serialised
+    // headingToInspection state, not a new PeepState.
+    static constexpr uint8_t kWorkerSubStateEgress = 5;
+
     void Staff::tick128UpdateWorker()
     {
         if (state == PeepState::picked)
@@ -1601,7 +1609,159 @@ namespace OpenRCT2
             // tile itself): fall through to the step-off below.
         }
 
-        // Step off the platform / stall tile onto an adjacent path tile, then resume patrolling.
+        if (state == PeepState::headingToInspection && subState == kWorkerSubStateEgress)
+        {
+            // Already walking out when a second leave-post request lands
+            // (the assignment was pulled mid-egress): the post is gone, so
+            // complete the departure at once with the step-off below rather
+            // than starting a second egress towards a stale station.
+            workerStepOffToAdjacentPath();
+            return;
+        }
+
+        // A ride operator at post leaves through their station's exit, the
+        // way guests do. The v1 behaviour stepped sideways off the platform
+        // onto whatever tile neighboured the slot - for an elevated station
+        // that meant a fall (or a teleport down) onto the ground under the
+        // ride, grass included.
+        if (state == PeepState::operating && assignedRide != nullptr && workerBeginEgress(*assignedRide))
+        {
+            return;
+        }
+
+        // Travelling workers (never reached the post - they are on the path
+        // network already) and operators whose ride has no usable exit:
+        // step off onto an adjacent path tile.
+        workerStepOffToAdjacentPath();
+    }
+
+    // Starts the walk out of a closed ride: from the platform slot back to
+    // the point just inside the station's exit, where the egress handler
+    // (updateWorkerEgress) steps the worker onto the exit tile's path.
+    // The door is the same one the trip in used - workerDirectionPath
+    // pathfinds to the station's exit, or to its entrance when the station
+    // has no separate exit, and the step-in crosses that element - so
+    // there is no in/out asymmetry: both directions use exit-else-entrance
+    // of the station the worker is posted at (their currentRideStation).
+    // Returns false when the station has neither an exit nor an entrance
+    // (not yet placed, or deleted under them); the caller falls back to
+    // the adjacent-path step-off.
+    bool Staff::workerBeginEgress(const Ride& ride)
+    {
+        const auto& station = ride.getStation(currentRideStation);
+        auto exitLoc = station.exit;
+        if (exitLoc.isNull())
+        {
+            exitLoc = station.entrance;
+        }
+        if (exitLoc.isNull())
+        {
+            return false;
+        }
+
+        // The point just inside the exit where guests leaving the ride are
+        // placed (Guest::updateRidePrepareForExit): the exit tile's
+        // centre, shifted back against the exit's direction.
+        auto destination = exitLoc.toCoordsXY().toTileCentre();
+        destination.x -= DirectionOffsets[exitLoc.direction].x * 20;
+        destination.y -= DirectionOffsets[exitLoc.direction].y * 20;
+
+        setState(PeepState::headingToInspection);
+        subState = kWorkerSubStateEgress;
+        mechanicTimeSinceCall = 0;
+        setDestination(destination, 2);
+        return true;
+    }
+
+    // Per-tick egress: walk to the exit's inner point, then step onto the
+    // path element in the exit tile - the same snap a guest leaving the
+    // ride gets in Guest::updateRideLeaveExit - and resume patrolling,
+    // from where stock staff pathfinding walks the worker away along the
+    // path. The worker stays assigned throughout; only the at-post state
+    // ends. Every failure path leaves the worker in a stock recovery
+    // (step-off or falling), never wedged in the egress subState.
+    void Staff::updateWorkerEgress(const Ride* ride)
+    {
+        if (ride == nullptr)
+        {
+            // The ride was demolished mid-egress: the same stock recovery
+            // as a worker caught at post by a demolition.
+            setState(PeepState::falling);
+            return;
+        }
+
+        mechanicTimeSinceCall++;
+        if (mechanicTimeSinceCall > 250)
+        {
+            // The walk out is a few dozen units at platform height; if
+            // anything has gone wrong, complete the departure at once
+            // rather than wedge here.
+            workerStepOffToAdjacentPath();
+            return;
+        }
+
+        int16_t xyDistance = 0;
+        if (auto loc = updateAction(xyDistance); loc.has_value())
+        {
+            // Mirror the guests' in-exit walk (Guest::updateRideInExit):
+            // at platform height until the exit's inner edge is close,
+            // then at standing height.
+            int32_t newZ = z;
+            if (xyDistance >= 16)
+            {
+                newZ = ride->getStation(currentRideStation).getBaseZ() + ride->getRideTypeDescriptor().Heights.PlatformHeight;
+            }
+            moveTo({ loc.value(), newZ });
+            return;
+        }
+
+        // Arrived at the exit's inner point: step onto the path element in
+        // this tile at a matching height, as a leaving guest does.
+        bool snapped = false;
+        for (auto* pathElement : TileElementsView<PathElement>(CoordsXY{ x, y }))
+        {
+            int32_t height = MapHeightFromSlope(CoordsXY{ x, y }, pathElement->getSlopeDirection(), pathElement->isSloped());
+            height += pathElement->getBaseZ();
+            const int32_t zDiff = z - height;
+            if (zDiff > 0 || zDiff < -16)
+                continue;
+            moveTo({ x, y, height });
+            snapped = true;
+            break;
+        }
+        if (!snapped)
+        {
+            // The exit tile's path is gone (deleted under the exit):
+            // complete the departure with the step-off instead.
+            workerStepOffToAdjacentPath();
+            return;
+        }
+
+        setState(PeepState::patrolling);
+        subState = 0;
+        resetPathfindGoal();
+        setDestination({ x, y }, 2);
+    }
+
+    // The v1 departure, kept as the fallback for workers with no exit to
+    // leave through: step onto an adjacent genuine path tile, then resume
+    // patrolling. One v1 defect is fixed here: the step used to accept a
+    // path element at ANY height, so an elevated platform could teleport
+    // the worker down to a path running underneath the ride. A candidate
+    // must now sit within the guest-interaction height window of the
+    // worker's standing height ([-16, +8], the window GetStallPostTile
+    // applies), and queue tiles do not count as a landing. When nothing
+    // qualifies, the standard falling recovery applies - the worker drops
+    // to the surface below and patrols from there, as stock staff do.
+    void Staff::workerStepOffToAdjacentPath()
+    {
+        int32_t referenceZ = z;
+        if (auto* assignedRide = GetRide(currentRide);
+            assignedRide != nullptr && !assignedRide->getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
+        {
+            referenceZ = assignedRide->getStation(currentRideStation).getBaseZ();
+        }
+
         const auto currentTile = TileCoordsXY{ x, y };
         for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
         {
@@ -1611,8 +1771,12 @@ namespace OpenRCT2
                 continue;
             do
             {
-                if (tileElement->getType() == TileElementType::path && !tileElement->isGhost())
+                if (tileElement->getType() == TileElementType::path && !tileElement->isGhost()
+                    && !tileElement->asPath()->isQueue())
                 {
+                    const int32_t dz = tileElement->getBaseZ() - referenceZ;
+                    if (dz < -16 || dz > 8)
+                        continue;
                     const auto dest = neighbour.toCoordsXY() + CoordsXY{ 16, 16 };
                     moveTo(CoordsXYZ{ dest, tileElement->getBaseZ() });
                     setState(PeepState::patrolling);
@@ -1687,6 +1851,16 @@ namespace OpenRCT2
     void Staff::updateWorkerHeadingToPost()
     {
         auto* ride = GetRide(currentRide);
+
+        // Egress rides in this state too (workerBeginEgress): the ride
+        // being closed is the whole point of the walk out, so it is
+        // handled before the closed-ride abort below.
+        if (subState == kWorkerSubStateEgress)
+        {
+            updateWorkerEgress(ride);
+            return;
+        }
+
         // A pending-open ride is still RideStatus::closed, but its crew is
         // meant to be travelling to it (Workers opening gate).
         if (ride == nullptr || (ride->status == RideStatus::closed && ride->pendingOpenStatus == RideStatus::closed))
