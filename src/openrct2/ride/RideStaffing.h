@@ -70,32 +70,9 @@ namespace OpenRCT2::RideStaffing
     // stretch remain open-only.
     bool IsDispatchBlocked(const Ride& ride);
 
-    // The staff-list auto-assign toggle (Workers tab), under its redefined
-    // contract: its ONLY effect is at hire time (AssignNewWorker below). It
-    // never assigns an existing worker, never tops a crew up, and does not
-    // gate dispatch - assigned workers are sent to their posts by the staff
-    // think regardless of it. Enabled unless the player turned it off for
-    // this park; the flag is stored inverted (ParkFlag::
-    // workersAutoAssignDisabled - a historical name, kept because the flag
-    // is serialised) so pre-toggle saves read as enabled.
-    bool IsAutoAssignNewWorkersEnabled();
-
-    // Hire-time self-assignment, called by StaffHireNewAction for a fresh
-    // Worker while IsAutoAssignNewWorkersEnabled(): the worker takes the
-    // single worst-staffed post that still has a shortfall, in
-    // AutoAssignAll's selection order (shut stalls first, then lowest
-    // staffing fraction, then lowest ride id), over the hire-eligible set:
-    // rides that are open or testing, plus closed rides with a pending
-    // open request. A plain closed ride is NOT eligible - it would only
-    // soak the hire until somebody opens it. One hire is at most one
-    // assignment; with no eligible shortfall the worker simply spawns
-    // unassigned. Returns whether an assignment was made. Deterministic;
-    // draws no ScenarioRand.
-    bool AssignNewWorker(Staff& worker);
-
     // Opening gate: start every assigned worker's trip to this ride now.
-    // Never assigns anyone, in either toggle state - hire-time is the only
-    // system assignment, everything after that is manual.
+    // Summoning never assigns anyone - assignments are manual only, made
+    // through the staff-window dropdown or the ride-window button.
     void SummonWorkers(Ride& ride);
 
     // True when this ride's operators are drawn standing at their post.
@@ -120,17 +97,37 @@ namespace OpenRCT2::RideStaffing
     // be out on the circuit at once. Returns the ride's full train count when
     // staffing does not constrain it.
     int32_t GetCirculatingTrainCap(const Ride& ride);
-
     // Dispatch dwell stretch for understaffed rides: the base waiting time scaled
     // by required / atPost (rounded up), so a half-crewed ride dispatches half as
     // often. Returns the base value unchanged when staffing does not constrain it.
     int32_t ScaleDwellTicks(const Ride& ride, int32_t baseTicks);
 
-    // Assigns every unassigned worker to the worst-staffed post, worst first
-    // (closed stalls before rides, then lowest staffing fraction, then lowest
-    // ride id; the nearest unassigned worker wins each post). One-shot: workers
-    // are never pulled off an existing assignment. Returns how many were assigned.
-    // Retained for StaffAutoAssignAction, which no UI invokes any more; the
-    // hire path shares the selection order through AssignNewWorker.
-    int32_t AutoAssignAll();
+    // Break rooms (Workers): a break room is a ride of the cloned type
+    // RIDE_TYPE_BREAK_ROOM. This classification is the one place break-room
+    // logic keys off: the cloned objects bind to the type, and the type
+    // carries no guest interaction (see rtd/shops/BreakRoom.h), so guests
+    // can never target a room - only workers travel to one, through the
+    // worker machinery in Staff.cpp.
+    bool IsBreakRoom(const Ride& ride);
+
+    // How many workers may rest in one room at once (D3, as amended).
+    constexpr int32_t kBreakRoomCapacity = 20;
+
+    // The break room whose facility tile contains loc, or nullptr when the
+    // tile holds no break room. A resting worker's room is always derived
+    // this way from the tile under him, never stored on the worker.
+    Ride* GetBreakRoomAtTile(const CoordsXY& loc);
+
+    // Workers currently resting inside this room (state onBreak, derived
+    // room == this room). Counted on demand by scanning the staff list, so
+    // the count can never drift from reality across pickups, firings and
+    // demolitions - there is no stored counter to keep in sync.
+    int32_t CountWorkersOnBreak(const Ride& room);
+
+    // Where an idle worker's break trip should take him: his home room
+    // (Staff::breakRoom) when it is still a break room, open, and below
+    // capacity; otherwise the nearest open break room with capacity,
+    // measured from the worker. nullptr when no room can take him.
+    Ride* FindBreakRoomTripTarget(Staff& worker);
+
 } // namespace OpenRCT2::RideStaffing

@@ -62,6 +62,27 @@ namespace OpenRCT2
         RideId deferredAssignment;
         bool hasDeferredAssignment = false;
 
+        // Workers: the worker's home break room (Break Rooms) - the room
+        // chosen in the staff window's Break Room dropdown, or null for the
+        // nearest-room default. Streamed in the ParkFile entity record
+        // only, gated on kBreakRoomsVersion (see ParkFile.cpp); like the
+        // other ParkFile-only worker state it is absent from serialise(),
+        // so pre-65 saves load it as null (nearest).
+        RideId breakRoom;
+
+        // Workers: the break room this worker is currently travelling to.
+        // The trip destination lives here rather than in currentRide,
+        // which is the worker's assignment and must survive a break.
+        // Runtime-only, like deferredAssignment: a save made mid-trip
+        // loads with no trip in flight, and the worker think simply sends
+        // him again after a fresh idle grace.
+        RideId breakTripRoom;
+
+        // Workers: the tick from which an idle worker may leave for his
+        // break room (set when he first becomes idle-eligible, D4's grace
+        // already added), or 0 while he is not counting. Runtime-only.
+        uint32_t breakDepartureTick = 0;
+
         union // 1st statistic
         {
             uint32_t staffLawnsMown;
@@ -105,6 +126,14 @@ namespace OpenRCT2
         bool workerBeginHeadingToPost();
         bool isHiddenAtPost() const;
 
+        // Workers: set the home break room (staff window dropdown, via
+        // StaffSetBreakRoomAction). Null restores the nearest-room default.
+        void setBreakRoom(RideId roomId);
+        // Workers: step out of the break room he is resting in, back onto
+        // its frontage path tile, resuming patrolling. The exit funnel for
+        // every break-room exit trigger (assignment, summon, room closed).
+        void workerLeaveBreakRoom();
+
         void clearPatrolArea();
         void setPatrolArea(const CoordsXY& coords, bool value);
         void setPatrolArea(const MapRange& range, bool value);
@@ -130,6 +159,16 @@ namespace OpenRCT2
         bool updateFixingMoveToStationExit(bool firstRun, const Ride& ride);
         bool updateFixingFinishFixOrInspect(bool firstRun, int32_t steps, Ride& ride);
         bool updateFixingLeaveByEntranceExit(bool firstRun, const Ride& ride);
+
+        // Mechanics (two-tier breakdowns: the parts run inside fixing)
+        bool isOnPartsRun() const;
+        bool doPartsRunPathFinding();
+        Direction partsRunDirectionPath(uint8_t validDirections, PathElement* pathElement);
+        bool updateFixingLeavePlatformForParts(bool firstRun, const Ride& ride);
+        bool updateFixingGoToParts(bool firstRun);
+        bool updateFixingFetchParts(bool firstRun);
+        bool updateFixingReturnFromParts(bool firstRun, const Ride& ride);
+        bool updateFixingReenterStation(bool firstRun, Ride& ride);
         void updateRideInspected(RideId rideIndex);
         void updateHeadingToInspect();
 
@@ -144,6 +183,11 @@ namespace OpenRCT2
         void workerStepOffToAdjacentPath();
         bool doWorkerPathFinding();
         Direction workerDirectionPath(uint8_t validDirections, PathElement* pathElement);
+
+        // Workers (break rooms)
+        void tick128WorkerBreakRoomIdle();
+        bool workerBeginBreakTrip(RideId roomId);
+        void updateOnBreak();
 
         bool doHandymanPathFinding();
         bool doMechanicPathFinding();

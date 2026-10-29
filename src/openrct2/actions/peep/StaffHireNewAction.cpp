@@ -214,18 +214,8 @@ namespace OpenRCT2::GameActions
             {
                 // The first Worker hire engages ride/stall staffing park-wide, permanently.
                 park.flags.set(ParkFlag::workersEngaged);
-
-                // The auto-assign toggle's whole effect lives here: with it
-                // on, the new worker takes the worst-staffed eligible post
-                // (RideStaffing::AssignNewWorker); with it off, workers
-                // spawn unassigned and assignments are fully manual. No
-                // existing assignment is ever touched at hire. Engagement
-                // is set first, above, so the system the assignment feeds
-                // is already live.
-                if (RideStaffing::IsAutoAssignNewWorkersEnabled())
-                {
-                    RideStaffing::AssignNewWorker(*newPeep);
-                }
+                // Assignments are manual only: a new worker spawns unassigned, and
+                // nothing in the system ever assigns a worker automatically.
             }
 
             res.setData(StaffHireNewActionResult{ newPeep->id });

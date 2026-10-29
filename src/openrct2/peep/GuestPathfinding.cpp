@@ -348,14 +348,6 @@ namespace OpenRCT2::PathFinding
      */
     static int32_t PeepMoveOneTile(Direction direction, Peep& peep)
     {
-        // Lane changes (personal fork): the movement-layer overtake in the
-        // distance-field routing may substitute a sideways step for this
-        // straight one (see GuestSpreadTryLaneChange). Every guest chooser
-        // funnels through here, and rewriting the direction before anything
-        // else runs means the lane block, the furniture clamp and the
-        // corner cut below all process the substituted step exactly as if
-        // a chooser had picked it.
-        direction = GuestSpreadTryLaneChange(direction, peep);
         assert(DirectionValid(direction));
         auto newTile = CoordsXY{ CoordsXY{ peep.nextLoc } + CoordsDirectionDelta[direction] }.toTileCentre();
 

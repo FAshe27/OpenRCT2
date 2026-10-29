@@ -12,6 +12,7 @@
 #include "../GameState.h"
 #include "../entity/EntityList.h"
 #include "../entity/Staff.h"
+#include "../world/Map.h"
 #include "../world/ParkData.h"
 #include "RideData.h"
 #include "RideManager.hpp"
@@ -111,13 +112,6 @@ namespace OpenRCT2::RideStaffing
         return IsEngaged();
     }
 
-    bool IsAutoAssignNewWorkersEnabled()
-    {
-        // Stored inverted (bit set = disabled) so parks saved before the
-        // toggle existed read as enabled.
-        return !getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled);
-    }
-
     bool IsStallClosed(const Ride& ride)
     {
         const auto& rtd = ride.getRideTypeDescriptor();
@@ -180,165 +174,6 @@ namespace OpenRCT2::RideStaffing
         return std::min(scaled, 127);
     }
 
-    namespace
-    {
-        CoordsXY GetPostLocation(const Ride& ride)
-        {
-            const auto& rtd = ride.getRideTypeDescriptor();
-            if (rtd.Classification == RideClassification::shopOrStall)
-            {
-                return TileCoordsXY(ride.getStation().start).toCoordsXY();
-            }
-
-            const auto stations = ride.getStations();
-            for (size_t i = 0; i < stations.size(); i++)
-            {
-                const auto& station = ride.getStation(StationIndex::FromUnderlying(static_cast<uint8_t>(i)));
-                if (!station.exit.isNull())
-                    return TileCoordsXY(station.exit).toCoordsXY();
-                if (!station.entrance.isNull())
-                    return TileCoordsXY(station.entrance).toCoordsXY();
-            }
-            return ride.overallView;
-        }
-
-        int64_t DistanceSquared(const CoordsXY& a, const CoordsXY& b)
-        {
-            const int64_t dx = static_cast<int64_t>(a.x) - b.x;
-            const int64_t dy = static_cast<int64_t>(a.y) - b.y;
-            return dx * dx + dy * dy;
-        }
-
-        // How many more operators system assignment may still give a ride:
-        // its requirement minus everyone already assigned to it.
-        // CountAssignedOperators counts every worker whose currentRide is
-        // this ride, in any state - at post, on the way, or patrolling with
-        // the assignment in hand - so this is the assigned + en-route total
-        // the auto-assign cap is measured against. Manual assignment (the
-        // staff-window dropdown, the ride-window button) does not consult
-        // this and may exceed the requirement deliberately.
-        int32_t OperatorShortfall(const Ride& ride)
-        {
-            return std::max(0, GetRequiredOperators(ride) - CountAssignedOperators(ride));
-        }
-
-        struct AssignmentTarget
-        {
-            RideId rideId;
-            bool isStall;
-            float fraction;
-            CoordsXY postLocation;
-        };
-
-        // Which rides system assignment may pick, per caller.
-        enum class AssignmentEligibility : uint8_t
-        {
-            // AutoAssignAll: any ride that is not closed.
-            anyNonClosedRide,
-            // Hire-time self-assignment: rides actually running (open or
-            // testing) plus closed rides with a pending open request. A
-            // plain closed ride is excluded - it would only soak the hire
-            // until somebody opens it.
-            runningOrPending,
-        };
-
-        bool IsEligibleAssignmentTarget(const Ride& ride, AssignmentEligibility eligibility)
-        {
-            switch (eligibility)
-            {
-                case AssignmentEligibility::anyNonClosedRide:
-                    return ride.status != RideStatus::closed;
-                case AssignmentEligibility::runningOrPending:
-                    return ride.status == RideStatus::open || ride.status == RideStatus::testing
-                        || ride.pendingOpenStatus != RideStatus::closed;
-            }
-            return false;
-        }
-
-        // Every ride with an unfilled requirement that the caller's
-        // eligibility admits, worst first: shut stalls before rides, then
-        // lowest staffing fraction, then lowest ride id. This is the one
-        // selection order all system assignment shares (AutoAssignAll and
-        // the hire path) - stable, deterministic, no randomness anywhere.
-        std::vector<AssignmentTarget> CollectAssignmentTargets(AssignmentEligibility eligibility)
-        {
-            std::vector<AssignmentTarget> targets;
-            for (auto& ride : RideManager(getGameState()))
-            {
-                if (!IsEligibleAssignmentTarget(ride, eligibility))
-                    continue;
-                const auto staffing = GetStaffing(ride);
-                if (staffing.required <= 0 || OperatorShortfall(ride) <= 0)
-                    continue;
-                targets.push_back(
-                    { ride.id, ride.getRideTypeDescriptor().Classification == RideClassification::shopOrStall,
-                      staffing.fraction(), GetPostLocation(ride) });
-            }
-            std::sort(targets.begin(), targets.end(), [](const AssignmentTarget& a, const AssignmentTarget& b) {
-                if (a.isStall != b.isStall)
-                    return a.isStall > b.isStall;
-                if (a.fraction != b.fraction)
-                    return a.fraction < b.fraction;
-                return a.rideId.ToUnderlying() < b.rideId.ToUnderlying();
-            });
-            return targets;
-        }
-    } // namespace
-
-    int32_t AutoAssignAll()
-    {
-        int32_t assignedCount = 0;
-        while (true)
-        {
-            // Recompute targets each round: assignments change the fractions.
-            const auto targets = CollectAssignmentTargets(AssignmentEligibility::anyNonClosedRide);
-            if (targets.empty())
-                break;
-            const auto& target = targets.front();
-
-            // The nearest unassigned worker wins the post; ties go to the lowest entity id.
-            Staff* bestWorker = nullptr;
-            int64_t bestDistance = 0;
-            for (auto* staff : EntityList<Staff>())
-            {
-                if (!staff->isWorker() || !staff->currentRide.IsNull())
-                    continue;
-                if (staff->state == PeepState::picked)
-                    continue;
-                const int64_t distance = DistanceSquared({ staff->x, staff->y }, target.postLocation);
-                if (bestWorker == nullptr || distance < bestDistance
-                    || (distance == bestDistance && staff->id.ToUnderlying() < bestWorker->id.ToUnderlying()))
-                {
-                    bestWorker = staff;
-                    bestDistance = distance;
-                }
-            }
-            if (bestWorker == nullptr)
-                break;
-
-            bestWorker->setWorkerAssignment(target.rideId);
-            assignedCount++;
-        }
-        return assignedCount;
-    }
-
-    bool AssignNewWorker(Staff& worker)
-    {
-        if (!worker.isWorker() || !worker.currentRide.IsNull())
-            return false;
-
-        // One hire, at most one assignment: the single worst-staffed
-        // hire-eligible post. Dispatch is not started here - the staff
-        // think sends assigned workers to their posts, as for any manual
-        // assignment.
-        const auto targets = CollectAssignmentTargets(AssignmentEligibility::runningOrPending);
-        if (targets.empty())
-            return false;
-
-        worker.setWorkerAssignment(targets.front().rideId);
-        return true;
-    }
-
     void SummonWorkers(Ride& ride)
     {
         const int32_t required = GetRequiredOperators(ride);
@@ -346,18 +181,94 @@ namespace OpenRCT2::RideStaffing
             return;
 
         // Assigned crew start their trip now: summoning an assigned worker
-        // is their assignment taking effect, not auto-assign. Nobody is
-        // assigned here, in either toggle state - since the toggle's
-        // redefinition, hire-time (AssignNewWorker) is the only system
-        // assignment, and every assignment after that is manual. (Crew
-        // already travelling or at post are left be.)
+        // is their assignment taking effect, not an assignment. Nobody is
+        // assigned here - assignments are manual only, and this loop only
+        // walks workers who already hold one. (Crew already travelling or
+        // at post are left be.) An assigned worker resting in a break room
+        // comes out first: the summon is an exit trigger, and the trip to
+        // post starts from the room's frontage tile like any other.
         for (auto* staff : EntityList<Staff>())
         {
-            if (staff->isWorker() && staff->currentRide == ride.id
-                && (staff->state == PeepState::patrolling || staff->state == PeepState::falling))
+            if (!staff->isWorker() || staff->currentRide != ride.id)
+                continue;
+
+            if (staff->state == PeepState::patrolling || staff->state == PeepState::falling)
             {
                 staff->workerBeginHeadingToPost();
             }
+            else if (staff->state == PeepState::onBreak)
+            {
+                staff->workerLeaveBreakRoom();
+                staff->workerBeginHeadingToPost();
+            }
         }
+    }
+
+    bool IsBreakRoom(const Ride& ride)
+    {
+        return ride.type == RIDE_TYPE_BREAK_ROOM;
+    }
+
+    Ride* GetBreakRoomAtTile(const CoordsXY& loc)
+    {
+        auto* tileElement = MapGetFirstElementAt(loc);
+        if (tileElement == nullptr)
+            return nullptr;
+
+        do
+        {
+            if (tileElement->getType() == TileElementType::track)
+            {
+                auto* ride = GetRide(tileElement->asTrack()->getRideIndex());
+                if (ride != nullptr && IsBreakRoom(*ride))
+                    return ride;
+            }
+        } while (!(tileElement++)->isLastForTile());
+
+        return nullptr;
+    }
+
+    int32_t CountWorkersOnBreak(const Ride& room)
+    {
+        int32_t count = 0;
+        for (auto* staff : EntityList<Staff>())
+        {
+            if (staff->isWorker() && staff->state == PeepState::onBreak
+                && GetBreakRoomAtTile(CoordsXY{ staff->x, staff->y }) == &room)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    Ride* FindBreakRoomTripTarget(Staff& worker)
+    {
+        const auto hasSpace = [](const Ride& room) { return CountWorkersOnBreak(room) < kBreakRoomCapacity; };
+
+        if (auto* home = GetRide(worker.breakRoom);
+            home != nullptr && IsBreakRoom(*home) && home->status != RideStatus::closed && hasSpace(*home))
+        {
+            return home;
+        }
+
+        Ride* best = nullptr;
+        int64_t bestDistance = 0;
+        for (auto& ride : RideManager(getGameState()))
+        {
+            if (!IsBreakRoom(ride) || ride.status == RideStatus::closed || !hasSpace(ride))
+                continue;
+
+            const auto stationStart = ride.getStation().getStart();
+            const int64_t dx = stationStart.x - worker.x;
+            const int64_t dy = stationStart.y - worker.y;
+            const int64_t distance = dx * dx + dy * dy;
+            if (best == nullptr || distance < bestDistance)
+            {
+                best = &ride;
+                bestDistance = distance;
+            }
+        }
+        return best;
     }
 } // namespace OpenRCT2::RideStaffing

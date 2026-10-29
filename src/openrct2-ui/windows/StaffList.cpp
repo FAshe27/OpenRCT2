@@ -22,7 +22,6 @@
 #include <openrct2/actions/peep/PeepPickupAction.h>
 #include <openrct2/actions/peep/StaffFireAction.h>
 #include <openrct2/actions/peep/StaffHireNewAction.h>
-#include <openrct2/actions/peep/StaffSetAutoAssignOnOpenAction.h>
 #include <openrct2/actions/peep/StaffSetColourAction.h>
 #include <openrct2/config/Config.h>
 #include <openrct2/core/String.hpp>
@@ -78,7 +77,6 @@ namespace OpenRCT2::Ui::Windows
         WIDX_STAFF_LIST_QUICK_FIRE,
         WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON,
         WIDX_STAFF_LIST_MAP,
-        WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN,
     };
 
     static constexpr StringId kWindowTitle = STR_STAFF;
@@ -100,8 +98,7 @@ namespace OpenRCT2::Ui::Windows
         makeWidget({165, 17}, {   145,      13},                             WidgetType::button,    WindowColour::primary  , kStringIdNone,           STR_HIRE_STAFF_TIP       ), // hire button
         makeWidget({243, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_DEMOLISH),   STR_QUICK_FIRE_STAFF     ), // quick fire staff
         makeWidget({267, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_PATROL_BTN), STR_SHOW_PATROL_AREA_TIP ), // show staff patrol area tool
-        makeWidget({291, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_MAP),        STR_SHOW_STAFF_ON_MAP_TIP), // show staff on map button
-        makeWidget({  3, 46}, {   112,      13},                             WidgetType::checkbox, WindowColour::secondary, STR_AUTO_ASSIGN_ON_OPEN, STR_AUTO_ASSIGN_ON_OPEN_TIP)  // auto-assign on open toggle
+        makeWidget({291, 46}, {    24,      24},                             WidgetType::flatBtn,   WindowColour::secondary, ImageId(SPR_MAP),        STR_SHOW_STAFF_ON_MAP_TIP) // show staff on map button
     );
     // clang-format on
 
@@ -172,15 +169,6 @@ namespace OpenRCT2::Ui::Windows
                     _quickFireMode = !_quickFireMode;
                     invalidate();
                     break;
-                case WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN:
-                {
-                    // The flag is stored inverted (set = disabled), so the new
-                    // enabled state is whatever the disabled bit currently says.
-                    auto toggleAction = GameActions::StaffSetAutoAssignOnOpenAction(
-                        getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled));
-                    GameActions::Execute(&toggleAction, getGameState());
-                    break;
-                }
             }
         }
 
@@ -269,20 +257,16 @@ namespace OpenRCT2::Ui::Windows
             setWidgetPressed(WIDX_STAFF_LIST_WORKERS_TAB, false);
             setWidgetPressed(_selectedTab + WIDX_STAFF_LIST_HANDYMEN_TAB, true);
 
-            // Workers have no patrol areas, but get the auto-assign button instead.
+            // Workers have no patrol areas.
             const bool isWorkerTab = GetSelectedStaffType() == StaffType::worker;
             if (isWorkerTab)
             {
                 widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setHidden();
-                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].setVisible();
             }
             else
             {
                 widgets[WIDX_STAFF_LIST_SHOW_PATROL_AREA_BUTTON].setVisible();
-                widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].setHidden();
             }
-            setWidgetPressed(
-                WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN, !getGameState().park.flags.has(ParkFlag::workersAutoAssignDisabled));
 
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].text = GetStaffNamingConvention(GetSelectedStaffType()).ActionHire;
             widgets[WIDX_STAFF_LIST_UNIFORM_COLOUR_PICKER].setHidden();
@@ -305,18 +289,6 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_STAFF_LIST_MAP].right = width - 6;
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].left = width - 155;
             widgets[WIDX_STAFF_LIST_HIRE_BUTTON].right = width - 11;
-
-            // The auto-assign checkbox spans the strip left of the
-            // quick-fire group: its shipped 112 px left a 97 px text area
-            // that ellipsised the label ("Auto-assign new workers"), with
-            // the unassigned counter drawn hard against the cut. A checkbox
-            // label is ellipsised to its widget, so the widget itself has
-            // to span the free strip. The bottom lifts one pixel so the
-            // hit rect stays off the uniform-colour picker's top row -
-            // hit-testing takes the last matching widget, and the checkbox
-            // is the later one.
-            widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].right = width - 80;
-            widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].bottom = widgets[WIDX_STAFF_LIST_AUTO_ASSIGN_ON_OPEN].top + 11;
         }
 
         void onDraw(RenderTarget& rt) override

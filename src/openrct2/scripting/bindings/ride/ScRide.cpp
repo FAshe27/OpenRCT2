@@ -828,7 +828,10 @@ namespace OpenRCT2::Scripting
             auto it = kBreakdownMap.find(breakDown);
             if (it != kBreakdownMap.end())
             {
-                RidePrepareBreakdown(*ride, it->second);
+                // Script-forced breakdowns are minor: the major tier is
+                // derived from the breakdown roll, and a script call has
+                // no roll to derive it from (and must not draw one).
+                RidePrepareBreakdown(*ride, it->second, false);
             }
         }
         return JS_UNDEFINED;

@@ -3891,3 +3891,9 @@ STR_7097    :No unassigned workers are available
 STR_7098    :Opening - waiting for staff ({COMMA16}/{COMMA16})
 STR_7099    :Auto-assign new workers
 STR_7100    :New workers assign themselves to the ride or stall most in need of crew when hired
+STR_7101    :Break Room
+STR_7102    :Nearest
+STR_7103    :No break rooms
+STR_7104    :On a break
+STR_7105    :Break Room
+STR_7106    :A break room where park workers can rest between duties

@@ -19,12 +19,17 @@ namespace OpenRCT2
     struct ObjectRepositoryItem;
 
     // Current version that is saved.
-    constexpr uint32_t kParkFileCurrentVersion = 64;
+    constexpr uint32_t kParkFileCurrentVersion = 65;
 
     // The minimum version that is forwards compatible with the current version.
     // Raised to 64 with the Workers feature: the park chunk gained a field
     // mid-stream, so older builds must refuse these files rather than misread them.
-    constexpr uint32_t kParkFileMinVersion = 64;
+    // Raised to 65 with Break Rooms on the same principle: the Staff entity
+    // record gained a version-gated field (Staff::breakRoom) inside the
+    // entity stream, so a 64 build reading a 65 file would desync every
+    // entity after the first staff member. Older saves still load here -
+    // the gate defaults the field to the nearest-room rule.
+    constexpr uint32_t kParkFileMinVersion = 65;
 
     // The minimum version that is backwards compatible with the current version.
     // If this is increased beyond 0, uncomment the checks in ParkFile.cpp and Context.cpp!
@@ -68,6 +73,8 @@ namespace OpenRCT2
     constexpr uint16_t kExtendedColoursGoldVersion = 63;
     // Workers: StaffType::worker and PeepState::operating stream values, Park::staffWorkerColour.
     constexpr uint16_t kWorkersVersion = 64;
+    // Break Rooms: Staff::breakRoom (the worker's home break room) joins the Staff entity record.
+    constexpr uint16_t kBreakRoomsVersion = 65;
 
     class ParkFileExporter
     {

@@ -19,6 +19,7 @@
 #include <openrct2/actions/GameActionRunner.h>
 #include <openrct2/actions/peep/PeepPickupAction.h>
 #include <openrct2/actions/peep/StaffSetAssignmentAction.h>
+#include <openrct2/actions/peep/StaffSetBreakRoomAction.h>
 #include <openrct2/actions/peep/StaffSetCostumeAction.h>
 #include <openrct2/actions/peep/StaffSetNameAction.h>
 #include <openrct2/actions/peep/StaffSetOrdersAction.h>
@@ -83,6 +84,8 @@ namespace OpenRCT2::Ui::Windows
         WIDX_CHECKBOX_4,
         WIDX_COSTUME_BOX,
         WIDX_COSTUME_BTN,
+        WIDX_BREAK_ROOM_BOX,
+        WIDX_BREAK_ROOM_BTN,
     };
 
     VALIDATE_GLOBAL_WIDX(WC_PEEP, WIDX_PATROL);
@@ -116,7 +119,9 @@ namespace OpenRCT2::Ui::Windows
         makeWidget     ({      5,  84},                {180,  12}, WidgetType::checkbox,     WindowColour::secondary                                            ), // Checkbox 3
         makeWidget     ({      5, 101},                {180,  12}, WidgetType::checkbox,     WindowColour::secondary                                            ), // Checkbox 4
         makeWidget     ({      5,  50},                {180,  12}, WidgetType::dropdownMenu, WindowColour::secondary                                            ), // Costume Dropdown
-        makeWidget     ({kWindowSize.width - 17,  51}, { 11,  10}, WidgetType::button,       WindowColour::secondary, STR_DROPDOWN_GLYPH, STR_SELECT_COSTUME_TIP) // Costume Dropdown Button
+        makeWidget     ({kWindowSize.width - 17,  51}, { 11,  10}, WidgetType::button,       WindowColour::secondary, STR_DROPDOWN_GLYPH, STR_SELECT_COSTUME_TIP), // Costume Dropdown Button
+        makeWidget     ({      5,  98},                {180,  12}, WidgetType::dropdownMenu, WindowColour::secondary                                            ), // Break Room Dropdown (workers only)
+        makeWidget     ({kWindowSize.width - 17,  99}, { 11,  10}, WidgetType::button,       WindowColour::secondary, STR_DROPDOWN_GLYPH, STR_SELECT_COSTUME_TIP)  // Break Room Dropdown Button
     );
 
     // 0x9AF9F4
@@ -137,6 +142,8 @@ namespace OpenRCT2::Ui::Windows
         std::vector<AvailableCostume> _availableCostumes;
         std::vector<RideId> _assignmentRideIds;
         u8string _assignmentText;
+        std::vector<RideId> _breakRoomRideIds;
+        u8string _breakRoomText;
         uint16_t _tabAnimationOffset = 0;
         int32_t _pickedPeepOldX = kLocationNull;
         u8string _windowTitle{};
@@ -785,6 +792,16 @@ namespace OpenRCT2::Ui::Windows
 
         void OptionsOnMouseDown(WidgetIndex widgetIndex)
         {
+            if (widgetIndex == WIDX_BREAK_ROOM_BTN)
+            {
+                auto* staff = GetStaff();
+                if (staff != nullptr && staff->isWorker())
+                {
+                    ShowBreakRoomDropdown(&widgets[WIDX_BREAK_ROOM_BOX], *staff);
+                }
+                return;
+            }
+
             if (widgetIndex != WIDX_COSTUME_BTN)
             {
                 return;
@@ -828,6 +845,21 @@ namespace OpenRCT2::Ui::Windows
 
         void OptionsOnDropdown(WidgetIndex widgetIndex, int32_t dropdownIndex)
         {
+            if (widgetIndex == WIDX_BREAK_ROOM_BTN)
+            {
+                if (dropdownIndex == -1)
+                    return;
+
+                auto* staff = GetStaff();
+                if (staff != nullptr && staff->isWorker() && dropdownIndex >= 0
+                    && static_cast<size_t>(dropdownIndex) < _breakRoomRideIds.size())
+                {
+                    auto action = GameActions::StaffSetBreakRoomAction(staff->id, _breakRoomRideIds[dropdownIndex]);
+                    GameActions::Execute(&action, getGameState());
+                }
+                return;
+            }
+
             if (widgetIndex != WIDX_COSTUME_BTN)
             {
                 return;
@@ -890,6 +922,56 @@ namespace OpenRCT2::Ui::Windows
             WindowDropdownShowTextCustomWidth(ddPos, ddHeight, colours[1], 0, {}, itemIndex, ddWidth);
         }
 
+        void ShowBreakRoomDropdown(Widget* ddWidget, const Staff& staff)
+        {
+            _breakRoomRideIds.clear();
+            _breakRoomRideIds.push_back(RideId::GetNull());
+
+            int32_t itemIndex = 0;
+            gDropdown.items[itemIndex] = Dropdown::MenuLabel(STR_STAFF_BREAK_ROOM_NEAREST);
+            if (staff.breakRoom.IsNull())
+                gDropdown.items[itemIndex].setChecked(true);
+            itemIndex++;
+
+            // Rooms are listed nearest first, measured from the worker's
+            // assigned ride - or from the worker himself while he is
+            // unassigned - so the automatic nearest default is easy to
+            // find by eye in the list.
+            std::vector<const Ride*> rooms;
+            for (auto& ride : RideManager(getGameState()))
+            {
+                if (RideStaffing::IsBreakRoom(ride))
+                    rooms.push_back(&ride);
+            }
+
+            const auto* assignedRide = GetRide(staff.currentRide);
+            const auto anchor = assignedRide != nullptr ? assignedRide->getStation().getStart()
+                                                        : CoordsXYZ{ staff.x, staff.y, staff.z };
+            const auto distanceTo = [anchor](const Ride* room) {
+                const auto start = room->getStation().getStart();
+                const int64_t dx = start.x - anchor.x;
+                const int64_t dy = start.y - anchor.y;
+                return dx * dx + dy * dy;
+            };
+            std::sort(rooms.begin(), rooms.end(), [distanceTo](const Ride* a, const Ride* b) {
+                return distanceTo(a) < distanceTo(b);
+            });
+
+            for (const auto* room : rooms)
+            {
+                gDropdown.items[itemIndex] = Dropdown::MenuLabel(room->getName());
+                if (staff.breakRoom == room->id)
+                    gDropdown.items[itemIndex].setChecked(true);
+                _breakRoomRideIds.push_back(room->id);
+                itemIndex++;
+            }
+
+            auto ddPos = ScreenCoordsXY{ ddWidget->left + windowPos.x, ddWidget->top + windowPos.y };
+            int32_t ddHeight = ddWidget->height();
+            int32_t ddWidth = ddWidget->width() - 4;
+            WindowDropdownShowTextCustomWidth(ddPos, ddHeight, colours[1], 0, {}, itemIndex, ddWidth);
+        }
+
         void OptionsDraw(Drawing::RenderTarget& rt)
         {
             auto staff = GetStaff();
@@ -899,6 +981,7 @@ namespace OpenRCT2::Ui::Windows
             }
 
             drawText(rt, windowPos + ScreenCoordsXY{ 5, 52 }, STR_STAFF_ASSIGNMENT);
+            drawText(rt, windowPos + ScreenCoordsXY{ 5, 84 }, STR_STAFF_BREAK_ROOM);
         }
 
         void OptionsPrepareDraw()
@@ -935,6 +1018,41 @@ namespace OpenRCT2::Ui::Windows
                         _assignmentText = LanguageGetString(STR_STAFF_UNASSIGNED);
                     }
                     widgets[WIDX_COSTUME_BOX].setString(_assignmentText.c_str());
+
+                    // The second dropdown (Break Rooms): the worker's
+                    // home break room, under its own label.
+                    widgets[WIDX_BREAK_ROOM_BOX].setVisible();
+                    widgets[WIDX_BREAK_ROOM_BTN].setVisible();
+                    widgets[WIDX_BREAK_ROOM_BOX].top = 98;
+                    widgets[WIDX_BREAK_ROOM_BOX].bottom = 110;
+                    widgets[WIDX_BREAK_ROOM_BTN].top = 99;
+                    widgets[WIDX_BREAK_ROOM_BTN].bottom = 109;
+
+                    bool anyBreakRoom = false;
+                    for (auto& room : RideManager(getGameState()))
+                    {
+                        if (RideStaffing::IsBreakRoom(room))
+                        {
+                            anyBreakRoom = true;
+                            break;
+                        }
+                    }
+
+                    auto* homeRoom = GetRide(staff->breakRoom);
+                    if (homeRoom != nullptr)
+                    {
+                        _breakRoomText = homeRoom->getName();
+                    }
+                    else if (anyBreakRoom)
+                    {
+                        _breakRoomText = LanguageGetString(STR_STAFF_BREAK_ROOM_NEAREST);
+                    }
+                    else
+                    {
+                        _breakRoomText = LanguageGetString(STR_STAFF_NO_BREAK_ROOMS);
+                    }
+                    widgets[WIDX_BREAK_ROOM_BOX].setString(_breakRoomText.c_str());
+                    setWidgetDisabled(WIDX_BREAK_ROOM_BTN, !anyBreakRoom);
                     break;
                 }
                 case StaffType::entertainer:
@@ -945,6 +1063,8 @@ namespace OpenRCT2::Ui::Windows
                     widgets[WIDX_CHECKBOX_4].setHidden();
                     widgets[WIDX_COSTUME_BOX].setVisible();
                     widgets[WIDX_COSTUME_BTN].setVisible();
+                    widgets[WIDX_BREAK_ROOM_BOX].setHidden();
+                    widgets[WIDX_BREAK_ROOM_BTN].setHidden();
                     widgets[WIDX_COSTUME_BOX].top = 50;
                     widgets[WIDX_COSTUME_BOX].bottom = 62;
                     widgets[WIDX_COSTUME_BTN].top = 51;
@@ -978,6 +1098,8 @@ namespace OpenRCT2::Ui::Windows
                     widgets[WIDX_CHECKBOX_4].text = STR_STAFF_OPTION_MOW_GRASS;
                     widgets[WIDX_COSTUME_BOX].setHidden();
                     widgets[WIDX_COSTUME_BTN].setHidden();
+                    widgets[WIDX_BREAK_ROOM_BOX].setHidden();
+                    widgets[WIDX_BREAK_ROOM_BTN].setHidden();
                     OptionsSetCheckboxValues();
                     break;
                 case StaffType::mechanic:
@@ -990,6 +1112,8 @@ namespace OpenRCT2::Ui::Windows
                     widgets[WIDX_COSTUME_BOX].setHidden();
                     widgets[WIDX_COSTUME_BTN].setHidden();
                     widgets[WIDX_COSTUME_BTN].setHidden();
+                    widgets[WIDX_BREAK_ROOM_BOX].setHidden();
+                    widgets[WIDX_BREAK_ROOM_BTN].setHidden();
                     OptionsSetCheckboxValues();
                     break;
                 case StaffType::security:

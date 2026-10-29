@@ -134,6 +134,13 @@ namespace OpenRCT2
         fixedRatings,       // When set, the ratings will not be updated (useful for hacked rides).
         randomShopColours,
         reversedTrains,
+        // Two-tier breakdowns: this breakdown is major (the parts-run
+        // tier), and the parts have been fetched. Both live in the flags
+        // field ParkFile already streams, so the tier survives a
+        // save/load mid-breakdown with no format change. Set at
+        // RidePrepareBreakdown; cleared by RideFixBreakdown.
+        breakdownMajor,
+        breakdownPartsFetched,
     };
     using RideFlags = FlagHolder<uint32_t, RideFlag>;
 
@@ -426,6 +433,15 @@ namespace OpenRCT2
         uint8_t lastInspection{};
         uint8_t downtimeHistory[Limits::kDowntimeHistorySize]{};
         uint32_t numPrimaryItemsSold{};
+        // Stall/shop stock capacity (restock survey's recommended
+        // starting point: ~40 items - a busy stall sells out in a few
+        // game days, a quiet one effectively never).
+        static constexpr uint16_t kShopStockCapacity = 40;
+        // Stall/shop stock on hand (restock survey): a field only in this
+        // build - nothing decrements or reads it yet; it exists so the
+        // bundled ParkFile 65 format carries it from the start. Defaults
+        // to full (kShopStockCapacity) at creation and on pre-65 saves.
+        uint16_t shopStock = kShopStockCapacity;
         uint32_t numSecondaryItemsSold{};
         // Used to oscillate the sound when ride breaks down.
         // 0 = no change, 255 = max change
@@ -732,6 +748,10 @@ namespace OpenRCT2
         RIDE_TYPE_CLASSIC_STAND_UP_ROLLER_COASTER,
         RIDE_TYPE_LSM_LAUNCHED_ROLLER_COASTER,
         RIDE_TYPE_CLASSIC_WOODEN_TWISTER_ROLLER_COASTER,
+        // Workers fork: appended at the end - existing values stream raw
+        // into saves and must never move. The break room is a shop-class
+        // facility cloned from the toilets (see rtd/shops/BreakRoom.h).
+        RIDE_TYPE_BREAK_ROOM,
 
         RIDE_TYPE_COUNT
     };
@@ -878,7 +898,7 @@ namespace OpenRCT2
     Staff* RideFindClosestMechanic(const Ride& ride, int32_t forInspection);
     int32_t RideInitialiseConstructionWindow(Ride& ride);
     void RideSetMapTooltip(const TileElement& tileElement);
-    void RidePrepareBreakdown(Ride& ride, Breakdown breakdownReason);
+    void RidePrepareBreakdown(Ride& ride, Breakdown breakdownReason, bool isMajor);
     TileElement* RideGetStationStartTrackElement(const Ride& ride, StationIndex stationIndex);
     TileElement* RideGetStationExitElement(const CoordsXYZ& elementPos);
     money64 RideGetRefundPrice(const Ride& ride);

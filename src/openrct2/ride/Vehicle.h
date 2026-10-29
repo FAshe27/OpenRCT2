@@ -243,6 +243,20 @@ namespace OpenRCT2
         CoordsXY BoatLocation;
         uint8_t BlockBrakeSpeed;
 
+        // Lifetime circuit counters (ops survey, Step 0): completed
+        // circuits for this train, incremented beside NumLaps where a
+        // train arrives at a station (Vehicle.Station.cpp) - for the
+        // common single-station ride that is exactly once per circuit.
+        // cyclesSinceService is the wear counter a future service
+        // feature will zero; in this build nothing reads either counter
+        // and nothing resets cyclesSinceService. Streamed in the
+        // ParkFile vehicle record, gated on the bundled ParkFile 65
+        // version; pre-65 saves load both as 0 (service histories begin
+        // at load). Carried on every vehicle entity like NumLaps;
+        // meaningful on the train head, which is where laps are counted.
+        uint32_t lifetimeCycles{};
+        uint32_t cyclesSinceService{};
+
         constexpr bool IsHead() const
         {
             return SubType == Type::head;

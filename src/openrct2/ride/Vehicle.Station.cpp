@@ -1726,6 +1726,12 @@ void Vehicle::UpdateArriving()
 
     current_station = trackElement->getStationIndex();
     NumLaps++;
+    // Lifetime circuit counters (ops survey, Step 0): this arrival is
+    // where a completed circuit is observable - the same beat NumLaps
+    // counts. Pure bookkeeping on the train's motion path: no random
+    // draws, no branches on chance.
+    lifetimeCycles++;
+    cyclesSinceService++;
 
     if (sub_state != 0)
     {

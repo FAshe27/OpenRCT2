@@ -1317,6 +1317,37 @@ namespace OpenRCT2
      *
      *  rct2: 0x006AC622
      */
+    // Two-tier breakdowns: whether a fresh breakdown is major (the
+    // parts-run tier). Only vehicleMalfunction, controlFailure and
+    // safetyCutOut can be major - restraint and door reasons read as
+    // platform-quick fixes and stay minor, and brakesFailure is never
+    // selected at all (see RideGetNewBreakdownProblem).
+    //
+    // The tier is read off the breakdown roll RideBreakdownUpdate
+    // already drew for this breakdown - zero extra ScenarioRand draws,
+    // so the random stream is untouched. A triggering roll is at most
+    // 1 + kRideInitialReliability (25,856), so its bits above bit 14 are
+    // always zero on a triggered breakdown and cannot carry the tier;
+    // the lowest two bits carry it instead. Over a triggering range of
+    // N consecutive rolls, one residue class in four is major: exactly
+    // 25% when N is a multiple of 4, within a point of it once N passes
+    // a few hundred (the bulk of real breakdowns, at decayed
+    // reliability), skewing higher only for the freak breakdowns of
+    // near-fully-reliable rides, whose tiny ranges the residue effect
+    // dominates (the degenerate 2-roll range would be 50%).
+    static bool IsMajorBreakdown(Breakdown breakdownReason, uint32_t breakdownRoll)
+    {
+        switch (breakdownReason)
+        {
+            case Breakdown::vehicleMalfunction:
+            case Breakdown::controlFailure:
+            case Breakdown::safetyCutOut:
+                return (breakdownRoll & 3) == 0;
+            default:
+                return false;
+        }
+    }
+
     static void RideBreakdownUpdate(Ride& ride)
     {
         auto& gameState = getGameState();
@@ -1372,13 +1403,25 @@ namespace OpenRCT2
         //
         // a 0.8% chance, less the breakdown factor which accumulates as the game
         // continues.
-        if ((ride.reliability == 0
-             || static_cast<uint32_t>(ScenarioRand() & 0x2FFFFF) <= 1u + kRideInitialReliability - ride.reliability)
-            && !gameState.cheats.disableAllBreakdowns)
+        //
+        // The roll is captured, not just compared: whether the breakdown
+        // is major (two-tier breakdowns) is read off this same value by
+        // IsMajorBreakdown, so a breakdown costs exactly the draws stock
+        // spends - one here when reliability is above zero, and none when
+        // it is zero (that forced case passes a roll of 0 and is derived
+        // from the value 0 like any other).
+        uint32_t breakdownRoll = 0;
+        bool breakdownTriggered = ride.reliability == 0;
+        if (!breakdownTriggered)
+        {
+            breakdownRoll = static_cast<uint32_t>(ScenarioRand() & 0x2FFFFF);
+            breakdownTriggered = breakdownRoll <= 1u + kRideInitialReliability - ride.reliability;
+        }
+        if (breakdownTriggered && !gameState.cheats.disableAllBreakdowns)
         {
             auto breakdownReason = RideGetNewBreakdownProblem(ride);
             if (breakdownReason != Breakdown::none)
-                RidePrepareBreakdown(ride, breakdownReason);
+                RidePrepareBreakdown(ride, breakdownReason, IsMajorBreakdown(breakdownReason, breakdownRoll));
         }
     }
 
@@ -1395,6 +1438,19 @@ namespace OpenRCT2
             return Breakdown::none;
 
         auto availableBreakdownProblems = ride.getRideTypeDescriptor().availableBreakdowns;
+
+        // Brakes failure is never selected in this fork (Franklin's
+        // ruling, 2026-10-28): it is the one random-crash class, and
+        // crashes should come from design choices, not dice. It is taken
+        // out of the weighted pick entirely - rather than rejected after
+        // the pick, as the gates at the end of this function do for block
+        // sections and the cheat - so the remaining reasons keep their
+        // relative weights and the overall breakdown rate from the same
+        // single ScenarioRand draw below. Those gates are unreachable
+        // now and stay as the guard for any future re-admission. A brakes
+        // failure already in progress (an older save) still fixes
+        // normally: its fix sequence row is untouched.
+        availableBreakdownProblems.unset(Breakdown::brakesFailure);
 
         // Calculate the total probability range for all possible breakdown problems
         int32_t totalProbability = 0;
@@ -1475,7 +1531,7 @@ namespace OpenRCT2
      *
      *  rct2: 0x006B7348
      */
-    void RidePrepareBreakdown(Ride& ride, Breakdown breakdownReason)
+    void RidePrepareBreakdown(Ride& ride, Breakdown breakdownReason, bool isMajor)
     {
         StationIndex i;
         Vehicle* vehicle;
@@ -1484,6 +1540,18 @@ namespace OpenRCT2
             return;
 
         ride.flags.set(RideFlag::breakdownPending);
+
+        // Two-tier breakdowns: the tier is a property of the breakdown,
+        // not of any mechanic, so it is stored on the ride - a
+        // replacement mechanic inherits it, and a save/load
+        // mid-breakdown keeps it. Both bits live in the flags field
+        // ParkFile already streams, so there is no format change; they
+        // are cleared when the breakdown clears (RideFixBreakdown).
+        if (isMajor)
+            ride.flags.set(RideFlag::breakdownMajor);
+        else
+            ride.flags.unset(RideFlag::breakdownMajor);
+        ride.flags.unset(RideFlag::breakdownPartsFetched);
 
         ride.breakdownReasonPending = breakdownReason;
         ride.breakdownSoundModifier = 0;
@@ -1649,7 +1717,13 @@ namespace OpenRCT2
             case MechanicStatus::calling:
                 if (ride.getRideTypeDescriptor().availableBreakdowns.isEmpty())
                 {
-                    ride.flags.unset(RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection);
+                    // No breakdown is possible for this type: the current
+                    // one is cleared wholesale, tier bits included (they
+                    // are a property of the breakdown, like in
+                    // RideFixBreakdown).
+                    ride.flags.unset(
+                        RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection, RideFlag::breakdownMajor,
+                        RideFlag::breakdownPartsFetched);
                     break;
                 }
 
@@ -4665,7 +4739,12 @@ namespace OpenRCT2
      */
     void RideFixBreakdown(Ride& ride, int32_t reliabilityIncreaseFactor)
     {
-        ride.flags.unset(RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection);
+        // The breakdown is over: its tier bits clear with it (two-tier
+        // breakdowns) - the next breakdown re-derives its tier at
+        // RidePrepareBreakdown.
+        ride.flags.unset(
+            RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection, RideFlag::breakdownMajor,
+            RideFlag::breakdownPartsFetched);
         ride.windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list, RideInvalidateFlag::maintenance);
 
         if (ride.flags.has(RideFlag::onTrack))

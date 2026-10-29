@@ -101,8 +101,7 @@ namespace OpenRCT2
         setRestrictedScenery,
         setRideVisibility,
         setStaffAssignment,
-        autoAssignStaff,
-        setStaffAutoAssignOnOpen,
+        setStaffBreakRoom,
         count,
     };
 }

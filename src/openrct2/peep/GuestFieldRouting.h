@@ -58,21 +58,4 @@ namespace OpenRCT2::PathFinding
     bool GuestFieldTryStep(
         Peep& peep, const TileCoordsXYZ& loc, const TileCoordsXYZ& goal, uint8_t permittedEdges, Direction& outDirection);
 
-    // Lane changes (personal fork): the movement-layer companion to the
-    // field. GuestFieldTryStep can only ever rank strictly-downhill
-    // steps, so on a straight multi-wide path a goal-directed guest's
-    // column is conserved from entry - a lateral step is exactly
-    // equal-distance and never survives the downhill filter. Called as
-    // the first line of PeepMoveOneTile with the direction a chooser
-    // picked, this may substitute a sideways step for a straight one
-    // when the tile ahead is blocked by a slower or stopped guest, or
-    // clearly more crowded than the tile beside, subject to a chain of
-    // gates (walking guests going straight only, a hash-gated cooldown
-    // window, the movement graph's own step test, and for field-routed
-    // guests an equal-distance-only rule that preserves the field's
-    // strict-decrease arrival proof). Returns the direction unchanged
-    // unless every gate passes. Draws no ScenarioRand and keeps no
-    // state: every input is a deterministic function of game state.
-    Direction GuestSpreadTryLaneChange(Direction direction, Peep& peep);
-
 } // namespace OpenRCT2::PathFinding

@@ -87,6 +87,7 @@
 #include "rtd/gentle/ObservationTower.h"
 #include "rtd/gentle/SpaceRings.h"
 #include "rtd/gentle/SpiralSlide.h"
+#include "rtd/shops/BreakRoom.h"
 #include "rtd/shops/CashMachine.h"
 #include "rtd/shops/DrinkStall.h"
 #include "rtd/shops/FirstAid.h"
@@ -357,6 +358,7 @@ namespace OpenRCT2
         /* RIDE_TYPE_CLASSIC_STAND_UP_ROLLER_COASTER    */ kClassicStandUpRollerCoasterRTD,
         /* RIDE_TYPE_LSM_LAUNCHED_ROLLER_COASTER        */ kLSMLaunchedRollerCoasterRTD,
         /* RIDE_TYPE_CLASSIC_WOODEN_TWISTER_ROLLER_COASTER */ kClassicWoodenTwisterRollerCoasterRTD,
+        /* RIDE_TYPE_BREAK_ROOM                         */ kBreakRoomRTD,
     };
 
     bool RideTypeDescriptor::SupportsTrackGroup(const TrackGroup trackGroup) const

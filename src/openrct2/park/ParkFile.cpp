@@ -1862,6 +1862,18 @@ namespace OpenRCT2
                     cs.readWrite(ride.music);
                     cs.readWrite(ride.musicTuneId);
                     cs.readWrite(ride.musicPosition);
+
+                    // Stall/shop stock (bundled ParkFile 65 fields): a
+                    // field only in this build - nothing reads it yet.
+                    if (version >= kBreakRoomsVersion)
+                    {
+                        cs.readWrite(ride.shopStock);
+                    }
+                    else if (cs.getMode() == OrcaStream::Mode::reading)
+                    {
+                        // Pre-65 saves: stalls start fully stocked.
+                        ride.shopStock = Ride::kShopStockCapacity;
+                    }
                     return true;
                 });
             });
@@ -2409,6 +2421,18 @@ namespace OpenRCT2
         cs.readWrite(entity.scream_sound_id);
         cs.readWrite(entity.TrackSubposition);
         cs.readWrite(entity.NumLaps);
+        // Lifetime circuit counters (bundled ParkFile 65 fields).
+        if (os.getHeader().targetVersion >= kBreakRoomsVersion)
+        {
+            cs.readWrite(entity.lifetimeCycles);
+            cs.readWrite(entity.cyclesSinceService);
+        }
+        else if (cs.getMode() == OrcaStream::Mode::reading)
+        {
+            // Pre-65 saves: service histories begin at load.
+            entity.lifetimeCycles = 0;
+            entity.cyclesSinceService = 0;
+        }
         if (cs.getMode() == OrcaStream::Mode::reading && os.getHeader().targetVersion < kBlockBrakeImprovementsVersion)
         {
             uint8_t brakeSpeed;
@@ -2667,6 +2691,18 @@ namespace OpenRCT2
         cs.readWrite(entity.staffGardensWatered);
         cs.readWrite(entity.staffLitterSwept);
         cs.readWrite(entity.staffBinsEmptied);
+
+        // The worker's home break room (bundled ParkFile 65 fields).
+        if (os.getHeader().targetVersion >= kBreakRoomsVersion)
+        {
+            cs.readWrite(entity.breakRoom);
+        }
+        else if (cs.getMode() == OrcaStream::Mode::reading)
+        {
+            // Pre-65 saves: no home room chosen - the nearest-room
+            // default applies.
+            entity.breakRoom = RideId::GetNull();
+        }
     }
 
     template<>

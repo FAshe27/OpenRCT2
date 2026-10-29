@@ -119,9 +119,8 @@
     <ClInclude Include="actions\peep\PeepSpawnPlaceAction.h" />
     <ClInclude Include="actions\peep\StaffFireAction.h" />
     <ClInclude Include="actions\peep\StaffHireNewAction.h" />
-    <ClInclude Include="actions\peep\StaffAutoAssignAction.h" />
-    <ClInclude Include="actions\peep\StaffSetAutoAssignOnOpenAction.h" />
     <ClInclude Include="actions\peep\StaffSetAssignmentAction.h" />
+    <ClInclude Include="actions\peep\StaffSetBreakRoomAction.h" />
     <ClInclude Include="actions\peep\StaffSetColourAction.h" />
     <ClInclude Include="actions\peep\StaffSetCostumeAction.h" />
     <ClInclude Include="actions\peep\StaffSetNameAction.h" />
@@ -797,9 +796,8 @@
     <ClCompile Include="actions\peep\PeepSpawnPlaceAction.cpp" />
     <ClCompile Include="actions\peep\StaffFireAction.cpp" />
     <ClCompile Include="actions\peep\StaffHireNewAction.cpp" />
-    <ClCompile Include="actions\peep\StaffAutoAssignAction.cpp" />
-    <ClCompile Include="actions\peep\StaffSetAutoAssignOnOpenAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetAssignmentAction.cpp" />
+    <ClCompile Include="actions\peep\StaffSetBreakRoomAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetColourAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetCostumeAction.cpp" />
     <ClCompile Include="actions\peep\StaffSetNameAction.cpp" />

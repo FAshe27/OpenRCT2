@@ -758,6 +758,14 @@ namespace OpenRCT2
      */
     bool Staff::doMechanicPathFinding()
     {
+        // Two-tier breakdowns: on a parts run the mechanic walks the path
+        // network to a goal the stock ride-bound logic does not know
+        // (outbound: the park entrance; return: this ride's station).
+        if (isOnPartsRun())
+        {
+            return doPartsRunPathFinding();
+        }
+
         uint8_t validDirections = getValidPatrolDirections(nextLoc);
         Direction newDirection = kInvalidDirection;
         if (getNextIsSurface())
@@ -1491,10 +1499,80 @@ namespace OpenRCT2
     // headingToInspection state, not a new PeepState.
     static constexpr uint8_t kWorkerSubStateEgress = 5;
 
+    // The subState a worker rides in while stepping from a break room's
+    // frontage tile onto the room tile itself (updateWorkerHeadingToPost).
+    static constexpr uint8_t kWorkerSubStateBreakStepIn = 6;
+
+    // How long an idle worker waits before walking to his break room
+    // (D4): roughly half a game day. The wait runs on the 128-tick think
+    // cadence, so the effective grace is this plus up to 127 ticks.
+    static constexpr uint32_t kBreakRoomGraceTicks = 1000;
+
     void Staff::tick128UpdateWorker()
     {
         if (state == PeepState::picked)
             return;
+
+        // Break rooms: home-room hygiene. A home room that was demolished,
+        // or is no longer a break room, reverts to the nearest default.
+        if (!breakRoom.IsNull())
+        {
+            const auto* home = GetRide(breakRoom);
+            if (home == nullptr || !RideStaffing::IsBreakRoom(*home))
+                breakRoom = RideId::GetNull();
+        }
+
+        if (state == PeepState::onBreak)
+        {
+            // Residence validity, on the think cadence like post validity:
+            // the room is derived from the tile under the worker, so a
+            // demolished room fails the derivation, and a closed room
+            // empties through its frontage like a closed ride's post.
+            const auto* room = RideStaffing::GetBreakRoomAtTile(CoordsXY{ x, y });
+            if (room == nullptr)
+            {
+                workerStepOffToAdjacentPath();
+                return;
+            }
+            if (room->status == RideStatus::closed)
+            {
+                workerLeaveBreakRoom();
+                return;
+            }
+
+            // A resident whose ride needs him - opened, or gathering for
+            // the opening gate - leaves and heads to post, dispatched
+            // exactly like the patrolling worker in the branch below.
+            auto* assigned = GetRide(currentRide);
+            if (assigned != nullptr && RideStaffing::GetRequiredOperators(*assigned) > 0
+                && (assigned->status != RideStatus::closed || assigned->pendingOpenStatus != RideStatus::closed))
+            {
+                workerLeaveBreakRoom();
+                workerBeginHeadingToPost();
+            }
+            return;
+        }
+
+        if (!breakTripRoom.IsNull())
+        {
+            // A break trip in flight owns the worker: the assignment
+            // branches below must not read it as an invalid assignment (a
+            // break room requires no operators) and yank him out of it.
+            // Two things end the ownership early: the trip was interrupted
+            // (picked up and put down - he is no longer travelling), or
+            // his ride called him to post mid-trip. Both forget the trip
+            // and let the assignment branches settle him this think.
+            auto* assigned = GetRide(currentRide);
+            const bool calledToPost = assigned != nullptr && RideStaffing::GetRequiredOperators(*assigned) > 0
+                && (assigned->status != RideStatus::closed || assigned->pendingOpenStatus != RideStatus::closed);
+            if (!calledToPost && state == PeepState::headingToInspection)
+                return;
+
+            breakTripRoom = RideId::GetNull();
+            breakDepartureTick = 0;
+            if (state == PeepState::headingToInspection)
+                setState(PeepState::falling);
+        }
 
         auto* ride = GetRide(currentRide);
         const bool validAssignment = ride != nullptr && RideStaffing::GetRequiredOperators(*ride) > 0;
@@ -1510,6 +1588,7 @@ namespace OpenRCT2
                     setState(PeepState::falling);
             }
             currentRide = RideId::GetNull();
+            tick128WorkerBreakRoomIdle();
             return;
         }
 
@@ -1528,7 +1607,73 @@ namespace OpenRCT2
             && (ride->status != RideStatus::closed || awaitingCrew))
         {
             workerBeginHeadingToPost();
+            return;
         }
+
+        tick128WorkerBreakRoomIdle();
+    }
+
+    // The break-room idle rule (D4/D5): a worker with nothing to do -
+    // unassigned, or assigned to a closed ride that is not gathering for
+    // the opening gate - who has stood idle for the grace period walks to
+    // his break room and rests. Runs at the exits of tick128UpdateWorker,
+    // after the assignment branches have had their say: a worker they
+    // dispatched, hold at post, or are moving is never idle here. Testing
+    // and broken-down crews stay at post (their rides are not closed, or
+    // they are standing operating), exactly as D5 rules.
+    void Staff::tick128WorkerBreakRoomIdle()
+    {
+        if (state != PeepState::patrolling)
+        {
+            breakDepartureTick = 0;
+            return;
+        }
+
+        // Assigned to a ride that is open, or gathering its crew for the
+        // opening gate: the assignment owns him even while he waits.
+        if (auto* ride = GetRide(currentRide); ride != nullptr && RideStaffing::GetRequiredOperators(*ride) > 0
+            && (ride->status != RideStatus::closed || ride->pendingOpenStatus != RideStatus::closed))
+        {
+            breakDepartureTick = 0;
+            return;
+        }
+
+        const auto currentTicks = getGameState().currentTicks;
+        if (breakDepartureTick == 0)
+        {
+            // First idle think: start the grace. Whether the park has a
+            // room at all is not worth distinguishing here - the
+            // resolution below fails the same way and restarts it.
+            breakDepartureTick = currentTicks + kBreakRoomGraceTicks;
+            return;
+        }
+        if (currentTicks < breakDepartureTick)
+            return;
+
+        // Resolve the destination once, at trip start (D2/D3): the home
+        // room when it can take him, else the nearest room with capacity.
+        // When no room can take him - none built, all closed, all full -
+        // the grace restarts instead of retrying every think: the
+        // decision is once per idle transition, never a doorway retry.
+        auto* target = RideStaffing::FindBreakRoomTripTarget(*this);
+        if (target == nullptr)
+        {
+            breakDepartureTick = currentTicks + kBreakRoomGraceTicks;
+            return;
+        }
+
+        breakDepartureTick = 0;
+        workerBeginBreakTrip(target->id);
+    }
+
+    bool Staff::workerBeginBreakTrip(RideId roomId)
+    {
+        breakTripRoom = roomId;
+        currentRideStation = StationIndex::FromUnderlying(0);
+        setState(PeepState::headingToInspection);
+        subState = 0;
+        resetPathfindGoal();
+        return true;
     }
 
     bool Staff::workerBeginHeadingToPost()
@@ -1863,7 +2008,12 @@ namespace OpenRCT2
 
     void Staff::updateWorkerHeadingToPost()
     {
-        auto* ride = GetRide(currentRide);
+        // A break trip rides in this state too (Break Rooms): its
+        // destination is the room in breakTripRoom, not the assignment in
+        // currentRide, and the shop branch below serves both - a break
+        // room is a shop-class facility whose post is its frontage tile.
+        const bool toBreakRoom = !breakTripRoom.IsNull();
+        auto* ride = GetRide(toBreakRoom ? breakTripRoom : currentRide);
 
         // Egress rides in this state too (workerBeginEgress): the ride
         // being closed is the whole point of the walk out, so it is
@@ -1875,9 +2025,13 @@ namespace OpenRCT2
         }
 
         // A pending-open ride is still RideStatus::closed, but its crew is
-        // meant to be travelling to it (Workers opening gate).
+        // meant to be travelling to it (Workers opening gate). A break
+        // room never has a pending open, so a closed room aborts the trip
+        // like a demolished one.
         if (ride == nullptr || (ride->status == RideStatus::closed && ride->pendingOpenStatus == RideStatus::closed))
         {
+            if (toBreakRoom)
+                breakTripRoom = RideId::GetNull();
             setState(PeepState::falling);
             return;
         }
@@ -1906,7 +2060,41 @@ namespace OpenRCT2
             if (mechanicTimeSinceCall > 2500)
             {
                 // Could not reach the post; resume patrolling, the next think retries.
+                if (toBreakRoom)
+                    breakTripRoom = RideId::GetNull();
                 setState(PeepState::falling);
+                return;
+            }
+
+            if (subState == kWorkerSubStateBreakStepIn)
+            {
+                // Stepping from the room's frontage tile onto the room
+                // tile itself (the destination was set on arrival at the
+                // frontage, below): a straight-line walk at the room's
+                // base height, like the ride platform step-in. The
+                // give-up timer above covers this subState too.
+                if (auto loc = updateAction(); loc.has_value())
+                {
+                    moveTo({ loc.value(), ride->getStation().getBaseZ() });
+                    return;
+                }
+
+                // On the room tile. Capacity is checked again here - the
+                // room may have filled during the walk in; a worker who
+                // cannot enter steps back out to the frontage and waits
+                // there, and the idle rule re-sends him after a fresh
+                // grace rather than retrying at the doorway.
+                breakTripRoom = RideId::GetNull();
+                if (RideStaffing::CountWorkersOnBreak(*ride) < RideStaffing::kBreakRoomCapacity)
+                {
+                    setState(PeepState::onBreak);
+                    subState = 0;
+                }
+                else
+                {
+                    breakDepartureTick = getGameState().currentTicks + kBreakRoomGraceTicks;
+                    workerLeaveBreakRoom();
+                }
                 return;
             }
 
@@ -1931,6 +2119,17 @@ namespace OpenRCT2
             // never be true.)
             if (TileCoordsXY{ CoordsXY{ x, y } } == postTile.value())
             {
+                if (toBreakRoom)
+                {
+                    // Arrived at the room's frontage: step onto the room
+                    // tile itself and rest inside, undrawn. The step-in
+                    // subState walks the last tile like a platform step-in.
+                    const auto roomTile = TileCoordsXY(ride->getStation().start);
+                    setDestination(roomTile.toCoordsXY() + CoordsXY{ 16, 16 }, 2);
+                    subState = kWorkerSubStateBreakStepIn;
+                    return;
+                }
+
                 // Face the stall across the counter and take post.
                 const auto shopTile = TileCoordsXY(ride->getStation().start);
                 for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
@@ -2060,15 +2259,69 @@ namespace OpenRCT2
 
     bool Staff::isHiddenAtPost() const
     {
-        if (!isWorker() || state != PeepState::operating || currentRide.IsNull())
+        if (!isWorker())
+            return false;
+
+        // Resting inside a break room: undrawn, like an operator at a
+        // hidden post - the room is a building and the worker is in it.
+        if (state == PeepState::onBreak)
+            return true;
+
+        if (state != PeepState::operating || currentRide.IsNull())
             return false;
         const auto* ride = GetRide(currentRide);
         return ride != nullptr && !RideStaffing::AreOperatorsVisibleAtPost(*ride);
     }
 
+    // Resting inside a break room: stand at the room tile's centre,
+    // undrawn (isHiddenAtPost). Residence validity - room closed or
+    // demolished - is re-checked every 128 ticks in tick128UpdateWorker,
+    // exactly like post validity for updateOperating.
+    void Staff::updateOnBreak()
+    {
+        if (auto loc = updateAction(); loc.has_value())
+        {
+            moveTo({ loc.value(), z });
+        }
+        invalidate();
+    }
+
+    // The one way out of a break room: step back onto the room's frontage
+    // path tile (the tile GetStallPostTile computes for the facility) and
+    // resume patrolling there. Residents are undrawn, so the step reads
+    // as the worker emerging from the room. Every exit trigger funnels
+    // through here: an assignment instruction, a summon, the room
+    // closing, a home-room change. When no frontage can be found (the
+    // path was deleted under the room) the adjacent-path step-off is the
+    // fallback, and stock falling recovery behind it.
+    void Staff::workerLeaveBreakRoom()
+    {
+        if (const auto* room = RideStaffing::GetBreakRoomAtTile(CoordsXY{ x, y }); room != nullptr)
+        {
+            if (const auto postTile = GetStallPostTile(*room); postTile.has_value())
+            {
+                for (auto* pathElement : TileElementsView<PathElement>(postTile->toCoordsXY()))
+                {
+                    if (pathElement->isGhost())
+                        continue;
+
+                    const auto dest = postTile->toCoordsXY() + CoordsXY{ 16, 16 };
+                    moveTo(CoordsXYZ{ dest, pathElement->getBaseZ() });
+                    setState(PeepState::patrolling);
+                    subState = 0;
+                    resetPathfindGoal();
+                    setDestination(dest, 2);
+                    return;
+                }
+            }
+        }
+
+        workerStepOffToAdjacentPath();
+    }
+
     bool Staff::doWorkerPathFinding()
     {
-        if (state != PeepState::headingToInspection || currentRide.IsNull())
+        if (state != PeepState::headingToInspection || (currentRide.IsNull() && breakTripRoom.IsNull()))
         {
             // Not travelling to a post: wander like other unassigned staff.
             return doMiscPathFinding();
@@ -2141,8 +2394,11 @@ namespace OpenRCT2
 
         pathDirections |= (1 << direction);
 
-        // Worker is heading to their assigned ride or stall.
-        auto* ride = GetRide(currentRide);
+        // Worker is heading to their assigned ride or stall - or, on a
+        // break trip, to their break room (the destination in
+        // breakTripRoom, which the goal logic below treats exactly like a
+        // stall: a break room is a shop-class facility).
+        auto* ride = GetRide(!breakTripRoom.IsNull() ? breakTripRoom : currentRide);
         if (ride != nullptr && state == PeepState::headingToInspection)
         {
             TileCoordsXYZ goalPos;
@@ -2200,6 +2456,23 @@ namespace OpenRCT2
 
     void Staff::setWorkerAssignment(RideId rideId)
     {
+        // Break-room exits first: an assignment instruction is an exit
+        // trigger. A resting worker emerges onto the room's frontage and
+        // the normal flow below takes it from there (he is patrolling by
+        // the time it runs); a worker still travelling to a room abandons
+        // the trip - his state stays headingToInspection, so the leave
+        // logic below settles him as a traveller whose post changed, and
+        // the think re-dispatches from there.
+        if (state == PeepState::onBreak)
+        {
+            workerLeaveBreakRoom();
+        }
+        else if (!breakTripRoom.IsNull())
+        {
+            breakTripRoom = RideId::GetNull();
+            breakDepartureTick = 0;
+        }
+
         if (currentRide == rideId)
         {
             // Reaffirming the current assignment also cancels a deferred move
@@ -2238,6 +2511,52 @@ namespace OpenRCT2
         currentRideStation = StationIndex::FromUnderlying(0);
         subState = 0;
         resetPathfindGoal();
+    }
+
+    void Staff::setBreakRoom(RideId roomId)
+    {
+        breakRoom = roomId;
+
+        // A direct instruction re-targets a worker who is already resting
+        // or already travelling to a room (the design's idle/at-break
+        // re-target rule). Everyone else just has the field changed: the
+        // idle rule reads it when it next resolves a trip.
+        if (state == PeepState::onBreak)
+        {
+            const auto* resting = RideStaffing::GetBreakRoomAtTile(CoordsXY{ x, y });
+            if (!roomId.IsNull() && (resting == nullptr || resting->id != roomId))
+            {
+                // A specific new home that can take him: move. (Choosing
+                // "Nearest" while resting never moves him - he is already
+                // in a room, and re-resolving could only churn.)
+                auto* newHome = GetRide(roomId);
+                if (newHome != nullptr && RideStaffing::IsBreakRoom(*newHome) && newHome->status != RideStatus::closed
+                    && RideStaffing::CountWorkersOnBreak(*newHome) < RideStaffing::kBreakRoomCapacity)
+                {
+                    workerLeaveBreakRoom();
+                    workerBeginBreakTrip(newHome->id);
+                }
+            }
+            return;
+        }
+
+        if (!breakTripRoom.IsNull() && state == PeepState::headingToInspection)
+        {
+            // Turn the trip around to the newly chosen room (nearest
+            // resolution for the "Nearest" choice). No room can take him:
+            // abandon the trip - the heading update settles him as a
+            // traveller whose destination went away.
+            auto* target = RideStaffing::FindBreakRoomTripTarget(*this);
+            if (target == nullptr)
+            {
+                breakTripRoom = RideId::GetNull();
+                setState(PeepState::falling);
+            }
+            else
+            {
+                breakTripRoom = target->id;
+            }
+        }
     }
 
     // Applies an assignment change that setWorkerAssignment deferred while
@@ -2648,6 +2967,9 @@ namespace OpenRCT2
                 case PeepState::operating:
                     updateOperating();
                     break;
+                case PeepState::onBreak:
+                    updateOnBreak();
+                    break;
                 default:
                     // TODO reset to default state
                     assert(false);
@@ -2723,7 +3045,50 @@ namespace OpenRCT2
         PEEP_FIXING_MOVE_TO_STATION_EXIT = 12,
         PEEP_FIXING_FINISH_FIX_OR_INSPECT = 13,
         PEEP_FIXING_LEAVE_BY_ENTRANCE_EXIT = 14,
+
+        // Two-tier breakdowns, major tier: the parts run, inside fixing.
+        // Values sit above every stock substate - subState streams raw in
+        // saves, so stock values never move. The detour is entered
+        // deliberately from updateFixing's advancement logic, never by
+        // mask order alone (see kFixingPartsRunSubstates).
+        PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS = 15,
+        PEEP_FIXING_GO_TO_PARTS = 16,
+        PEEP_FIXING_FETCH_PARTS = 17,
+        PEEP_FIXING_RETURN_FROM_PARTS = 18,
+        PEEP_FIXING_REENTER_STATION = 19,
     };
+
+    // The parts-run detour substates, OR-ed into a breakdown's sequence
+    // mask when the breakdown is major (RideFlag::breakdownMajor). They
+    // sort above the stock substates, so mask advancement on its own can
+    // never wander from a stock beat into the detour - and once the
+    // re-enter substate hands the sequence back to the remaining stock
+    // beats, advancement steps over the stock beats only, because the
+    // finish and leave substates (13, 14) end the job below them.
+    static constexpr uint32_t kFixingPartsRunSubstates = (1 << PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS)
+        | (1 << PEEP_FIXING_GO_TO_PARTS) | (1 << PEEP_FIXING_FETCH_PARTS) | (1 << PEEP_FIXING_RETURN_FROM_PARTS)
+        | (1 << PEEP_FIXING_REENTER_STATION);
+
+    // The substates that perform a fix, as opposed to moving, fetching or
+    // finishing: a major breakdown's parts run is entered when the first
+    // of these completes.
+    static bool FixingSubstateIsFixBeat(int32_t subState)
+    {
+        switch (subState)
+        {
+            case PEEP_FIXING_FIX_VEHICLE_CLOSED_RESTRAINTS:
+            case PEEP_FIXING_FIX_VEHICLE_CLOSED_DOORS:
+            case PEEP_FIXING_FIX_VEHICLE_OPEN_RESTRAINTS:
+            case PEEP_FIXING_FIX_VEHICLE_OPEN_DOORS:
+            case PEEP_FIXING_FIX_VEHICLE_MALFUNCTION:
+            case PEEP_FIXING_FIX_STATION_END:
+            case PEEP_FIXING_FIX_STATION_START:
+            case PEEP_FIXING_FIX_STATION_BRAKES:
+                return true;
+            default:
+                return false;
+        }
+    }
 
     /**
      * FixingSubstatesForBreakdown[] defines the applicable peep sub_states for
@@ -2886,6 +3251,26 @@ namespace OpenRCT2
                     progressToNextSubstate = updateFixingLeaveByEntranceExit(firstRun, *ride);
                     break;
 
+                case PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS:
+                    progressToNextSubstate = updateFixingLeavePlatformForParts(firstRun, *ride);
+                    break;
+
+                case PEEP_FIXING_GO_TO_PARTS:
+                    progressToNextSubstate = updateFixingGoToParts(firstRun);
+                    break;
+
+                case PEEP_FIXING_FETCH_PARTS:
+                    progressToNextSubstate = updateFixingFetchParts(firstRun);
+                    break;
+
+                case PEEP_FIXING_RETURN_FROM_PARTS:
+                    progressToNextSubstate = updateFixingReturnFromParts(firstRun, *ride);
+                    break;
+
+                case PEEP_FIXING_REENTER_STATION:
+                    progressToNextSubstate = updateFixingReenterStation(firstRun, *ride);
+                    break;
+
                 default:
                     LOG_ERROR("Invalid substate");
                     progressToNextSubstate = false;
@@ -2904,6 +3289,27 @@ namespace OpenRCT2
             if (state != PeepState::inspecting)
             {
                 sub_state_sequence_mask = FixingSubstatesForBreakdown[EnumValue(ride->breakdownReasonPending)];
+                if (ride->flags.has(RideFlag::breakdownMajor))
+                {
+                    sub_state_sequence_mask |= kFixingPartsRunSubstates;
+                }
+            }
+
+            // Two-tier breakdowns: on a major breakdown the first fix
+            // beat is followed by the parts run, not by the remaining
+            // stock beats. The detour substates sort above the stock
+            // ones, so the mask scan below would step past the remaining
+            // beats first - enter the detour deliberately instead. Once
+            // the parts are fetched (RideFlag::breakdownPartsFetched,
+            // set by the re-enter substate) the stock sequence resumes
+            // and this cannot fire again; on a minor breakdown the tier
+            // bit is unset and the sequence is stock, byte for byte.
+            if (state == PeepState::fixing && ride->flags.has(RideFlag::breakdownMajor)
+                && !ride->flags.has(RideFlag::breakdownPartsFetched) && subState < PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS
+                && FixingSubstateIsFixBeat(subState))
+            {
+                subState = PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS;
+                continue;
             }
 
             do
@@ -3435,6 +3841,354 @@ namespace OpenRCT2
         }
         setState(PeepState::falling);
         return false;
+    }
+
+    // The parts source for a major breakdown's parts run (two-tier
+    // breakdowns): the park entrance nearest to hand. It always exists
+    // and is pathable by definition - staff spawn there - so v1 needs no
+    // placeable workshop and no new save state for the destination.
+    static std::optional<TileCoordsXYZD> GetNearestParkEntrance(const CoordsXY& from)
+    {
+        std::optional<TileCoordsXYZD> best;
+        int64_t bestDistance = 0;
+        const auto fromTile = TileCoordsXY{ from };
+        for (const auto& entrance : getGameState().park.entrances)
+        {
+            const int64_t dx = entrance.x - fromTile.x;
+            const int64_t dy = entrance.y - fromTile.y;
+            const int64_t distance = dx * dx + dy * dy;
+            if (!best.has_value() || distance < bestDistance)
+            {
+                best = entrance;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    bool Staff::isOnPartsRun() const
+    {
+        return state == PeepState::fixing && (subState == PEEP_FIXING_GO_TO_PARTS || subState == PEEP_FIXING_RETURN_FROM_PARTS);
+    }
+
+    // Pathfinding for the parts run's two network walks, modelled on the
+    // worker post-trip pair (doWorkerPathFinding / workerDirectionPath):
+    // same step choice, same destination tolerance draw as every other
+    // staff trip - the run adds no new random expressions, it reuses the
+    // staff pathfinding vocabulary wholesale.
+    bool Staff::doPartsRunPathFinding()
+    {
+        uint8_t validDirections = getValidPatrolDirections(nextLoc);
+        Direction newDirection = kInvalidDirection;
+        if (getNextIsSurface())
+        {
+            newDirection = mechanicDirectionSurface();
+        }
+        else
+        {
+            auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ nextLoc });
+            if (pathElement == nullptr)
+                return true;
+
+            newDirection = partsRunDirectionPath(validDirections, pathElement);
+        }
+
+        assert(DirectionValid(newDirection));
+
+        CoordsXY chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
+
+        while (!MapIsLocationValid(chosenTile))
+        {
+            newDirection = mechanicDirectionSurface();
+            chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
+        }
+
+        peepDirection = newDirection;
+        auto tolerance = (ScenarioRand() & 7) + 2;
+        setDestination(chosenTile + CoordsXY{ 16, 16 }, tolerance);
+
+        return false;
+    }
+
+    Direction Staff::partsRunDirectionPath(uint8_t validDirections, PathElement* pathElement)
+    {
+        uint32_t pathDirections = pathElement->getEdges();
+        pathDirections &= validDirections;
+
+        if (pathDirections == 0)
+        {
+            return mechanicDirectionSurface();
+        }
+
+        // Check if this is dead end - i.e. only way out is the reverse direction.
+        pathDirections &= ~(1 << DirectionReverse(peepDirection));
+        if (pathDirections == 0)
+        {
+            pathDirections |= (1 << DirectionReverse(peepDirection));
+        }
+
+        Direction direction = Numerics::bitScanForward(pathDirections);
+        pathDirections &= ~(1 << direction);
+        if (pathDirections == 0)
+        {
+            return direction;
+        }
+
+        pathDirections |= (1 << direction);
+
+        // The goal: outbound, the parts source (the nearest park
+        // entrance); returning, the assigned ride's station exit, or its
+        // entrance when the station has no separate exit - the same goal
+        // the stock mechanic pathfinding walks to.
+        std::optional<TileCoordsXYZ> goalPos;
+        if (subState == PEEP_FIXING_GO_TO_PARTS)
+        {
+            if (const auto entrance = GetNearestParkEntrance(CoordsXY{ x, y }); entrance.has_value())
+            {
+                goalPos = TileCoordsXYZ{ entrance.value() };
+            }
+        }
+        else if (auto* ride = GetRide(currentRide); ride != nullptr)
+        {
+            TileCoordsXYZD location = ride->getStation(currentRideStation).exit;
+            if (location.isNull())
+            {
+                location = ride->getStation(currentRideStation).entrance;
+            }
+            if (!location.isNull())
+            {
+                goalPos = TileCoordsXYZ{ location };
+            }
+        }
+
+        if (!goalPos.has_value())
+        {
+            return mechanicDirectionPathRand(pathDirections);
+        }
+
+        Direction pathfindDirection = PathFinding::ChooseDirection(
+            TileCoordsXYZ{ nextLoc }, goalPos.value(), *this, false, RideId::GetNull());
+        if (pathfindDirection == kInvalidDirection)
+        {
+            /* Heuristic search failed for all directions: reset the goal
+             * so the next call retries fresh, as in mechanicDirectionPath. */
+            resetPathfindGoal();
+            return mechanicDirectionPathRand(pathDirections);
+        }
+
+        return pathfindDirection;
+    }
+
+    /**
+     * fixing SubState (major tier): leave_platform_for_parts - walk to
+     * the station exit's inner point (the stock move-to-exit handler),
+     * then step onto the path element in the exit tile, the same snap a
+     * guest leaving the ride gets (and the worker egress uses). Stock's
+     * leave_by_entrance_exit cannot serve here: it ends the fixing
+     * state, and the parts run must stay in fixing or the ride-side
+     * status update would re-call a second mechanic mid-run.
+     */
+    bool Staff::updateFixingLeavePlatformForParts(bool firstRun, const Ride& ride)
+    {
+        if (!updateFixingMoveToStationExit(firstRun, ride))
+        {
+            return false;
+        }
+
+        // At the exit's inner point: step onto the exit tile's path.
+        for (auto* pathElement : TileElementsView<PathElement>(CoordsXY{ x, y }))
+        {
+            int32_t height = MapHeightFromSlope(CoordsXY{ x, y }, pathElement->getSlopeDirection(), pathElement->isSloped());
+            height += pathElement->getBaseZ();
+            const int32_t zDiff = z - height;
+            if (zDiff > 0 || zDiff < -16)
+                continue;
+            moveTo({ x, y, height });
+            resetPathfindGoal();
+            return true;
+        }
+
+        // The exit tile's path is gone (deleted under the exit): stock
+        // recovery - the ride re-calls and a mechanic restarts the job.
+        setState(PeepState::falling);
+        return false;
+    }
+
+    /**
+     * fixing SubState (major tier): go_to_parts - walk the path network
+     * to the parts source (the nearest park entrance). Movement is
+     * performNextAction with doPartsRunPathFinding choosing the steps;
+     * arrival is the entrance tile test, re-checked every tick like the
+     * stall post arrival. The give-up timer is the answering one: a
+     * mechanic who cannot get there falls back and the ride re-calls,
+     * restarting the job - never wedged in the substate.
+     */
+    bool Staff::updateFixingGoToParts(bool firstRun)
+    {
+        if (!firstRun)
+        {
+            mechanicTimeSinceCall = 0;
+            resetPathfindGoal();
+        }
+
+        mechanicTimeSinceCall++;
+        if (mechanicTimeSinceCall > 2500)
+        {
+            setState(PeepState::falling);
+            return false;
+        }
+
+        const auto entrance = GetNearestParkEntrance(CoordsXY{ x, y });
+        if (!entrance.has_value())
+        {
+            // No park entrance exists (a degenerate park - staff spawn
+            // there, so it should not happen): abandon the run.
+            setState(PeepState::falling);
+            return false;
+        }
+
+        if (TileCoordsXY{ CoordsXY{ x, y } } == TileCoordsXY{ entrance->x, entrance->y })
+        {
+            return true;
+        }
+
+        if (!checkForPath())
+            return false;
+
+        if (shouldWaitForLevelCrossing())
+            return false;
+
+        performNextAction();
+        return false;
+    }
+
+    /**
+     * fixing SubState (major tier): fetch_parts - dwell at the parts
+     * source, fetching. Frame-driven like every other fix beat: the
+     * dwell lasts one staffFixGround animation.
+     */
+    bool Staff::updateFixingFetchParts(bool firstRun)
+    {
+        if (!firstRun)
+        {
+            orientation = peepDirection << 3;
+            action = PeepActionType::staffFixGround;
+            animationFrameNum = 0;
+            animationImageIdOffset = 0;
+            updateCurrentAnimationType();
+        }
+
+        if (isActionWalking())
+        {
+            return true;
+        }
+
+        updateAction();
+        invalidate();
+        return false;
+    }
+
+    /**
+     * fixing SubState (major tier): return_from_parts - walk the path
+     * network back to the ride's station. Arrival is the entrance/exit
+     * element interaction, the same test updateAnswering uses, and hands
+     * over to the re-enter substate with the platform destination set,
+     * exactly as the answering trip into fixing does.
+     */
+    bool Staff::updateFixingReturnFromParts(bool firstRun, const Ride& ride)
+    {
+        if (!firstRun)
+        {
+            mechanicTimeSinceCall = 0;
+            resetPathfindGoal();
+        }
+
+        mechanicTimeSinceCall++;
+        if (mechanicTimeSinceCall > 2500)
+        {
+            setState(PeepState::falling);
+            return false;
+        }
+
+        if (!checkForPath())
+            return false;
+
+        if (shouldWaitForLevelCrossing())
+            return false;
+
+        const auto [pathingResult, rideEntranceExitElement] = performNextAction();
+        if (!(pathingResult & PATHING_RIDE_EXIT) && !(pathingResult & PATHING_RIDE_ENTRANCE))
+        {
+            return false;
+        }
+
+        if (currentRide != rideEntranceExitElement->asEntrance()->getRideIndex())
+            return false;
+
+        StationIndex exitIndex = rideEntranceExitElement->asEntrance()->getStationIndex();
+        if (currentRideStation != exitIndex)
+            return false;
+
+        if (pathingResult & PATHING_RIDE_ENTRANCE)
+        {
+            if (!ride.getStation(exitIndex).exit.isNull())
+            {
+                return false;
+            }
+        }
+
+        peepDirection = rideEntranceExitElement->getDirection();
+
+        int32_t destX = nextLoc.x + 16 + DirectionOffsets[peepDirection].x * 53;
+        int32_t destY = nextLoc.y + 16 + DirectionOffsets[peepDirection].y * 53;
+
+        setDestination({ destX, destY }, 2);
+        orientation = peepDirection << 3;
+
+        z = rideEntranceExitElement->baseHeight * 4;
+        subState = PEEP_FIXING_REENTER_STATION;
+        return false;
+    }
+
+    /**
+     * fixing SubState (major tier): reenter_station - walk from the
+     * station entrance/exit onto the platform (the answering trip's
+     * step-in shape), then hand the sequence back to the stock beats
+     * that remain: the parts are marked fetched on the ride, and the
+     * substate is set to the breakdown's first fix beat, so the
+     * advancement scan in updateFixing lands on the next stock substate
+     * after it and the job finishes exactly as a minor one does from
+     * there - same remaining beats, same finish, same leave.
+     */
+    bool Staff::updateFixingReenterStation(bool firstRun, Ride& ride)
+    {
+        int16_t delta_y = abs(y - getDestination().y);
+        if (auto loc = updateAction(); loc.has_value())
+        {
+            auto newZ = ride.getStation(currentRideStation).getBaseZ();
+            if (delta_y < 20)
+            {
+                newZ += ride.getRideTypeDescriptor().Heights.PlatformHeight;
+            }
+
+            moveTo({ loc.value(), newZ });
+            return false;
+        }
+
+        ride.flags.set(RideFlag::breakdownPartsFetched);
+
+        const uint32_t stockMask = FixingSubstatesForBreakdown[EnumValue(ride.breakdownReasonPending)];
+        int32_t firstBeat = PEEP_FIXING_ENTER_STATION;
+        for (int32_t candidate = 0; candidate <= PEEP_FIXING_LEAVE_BY_ENTRANCE_EXIT; candidate++)
+        {
+            if ((stockMask & (1 << candidate)) != 0 && FixingSubstateIsFixBeat(candidate))
+            {
+                firstBeat = candidate;
+                break;
+            }
+        }
+        subState = firstBeat;
+        return true;
     }
 
     /**

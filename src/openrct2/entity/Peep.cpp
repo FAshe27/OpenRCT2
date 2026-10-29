@@ -175,6 +175,7 @@ namespace OpenRCT2
             case PeepState::usingBin:
             case PeepState::watering:
             case PeepState::headingToInspection:
+            case PeepState::onBreak:
                 return true;
         }
         return false;
@@ -1443,6 +1444,8 @@ namespace OpenRCT2
                 return { PeepActionDescriptionType::headingToInspectRide, currentRide };
             case PeepState::operating:
                 return { PeepActionDescriptionType::operatingRide, currentRide };
+            case PeepState::onBreak:
+                return { PeepActionDescriptionType::onBreak };
             case PeepState::inspecting:
                 return { PeepActionDescriptionType::inspectingRide, currentRide };
         }
