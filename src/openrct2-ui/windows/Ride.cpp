@@ -4224,7 +4224,7 @@ namespace OpenRCT2::Ui::Windows
                                 numItems++;
                             }
                         }
-                        RidePrepareBreakdown(*ride, breakdown);
+                        RidePrepareBreakdown(*ride, breakdown, false);
                     }
                     break;
             }
