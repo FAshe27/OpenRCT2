@@ -216,6 +216,18 @@ namespace OpenRCT2::GameActions
                 park.flags.set(ParkFlag::workersEngaged);
                 // Assignments are manual only: a new worker spawns unassigned, and
                 // nothing in the system ever assigns a worker automatically.
+                // The spawn must be unassigned in the field as well as in
+                // intent: entityReset zero-fills a fresh entity, and a zero
+                // currentRide is not "no ride" - RideId null is 0xFFFF, so
+                // zero reads as ride index 0, and the worker think, the
+                // operator counts and the staff window all treated the
+                // first ride in the park as this hire's assignment
+                // (fix round 5, diagnosis Finding A). Initialise both
+                // fields at the hire funnel; existing saves are NOT
+                // scrubbed, because a stored 0 there is indistinguishable
+                // from a deliberate assignment to ride 0.
+                newPeep->currentRide = RideId::GetNull();
+                newPeep->currentRideStation = StationIndex::GetNull();
             }
 
             res.setData(StaffHireNewActionResult{ newPeep->id });

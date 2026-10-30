@@ -25,6 +25,7 @@
 #include "../interface/WindowBase.h"
 #include "../localisation/Formatter.h"
 #include "../network/Network.h"
+#include "../ride/RideStaffing.h"
 #include "../ride/Station.h"
 #include "../ui/WindowManager.h"
 #include "../windows/Intent.h"
@@ -543,6 +544,108 @@ namespace OpenRCT2
 
                 peep->windowInvalidateFlags |= PEEP_INVALIDATE_PEEP_STATS;
             }
+        }
+        // Workers assigned to this ride (fix round 5): the loops above
+        // relocate guests and fixing/inspecting staff only, so a worker
+        // at post, en route, egressing or on break kept a stale
+        // currentRide to the deleted ride, stood on its footprint until
+        // his next think cleared it there, and a new ride taking the
+        // freed slot in the meantime read the stale value as a live
+        // assignment. This pass runs while the exit position above is
+        // still computable, so the assignment dies with the ride.
+        for (auto peep : EntityList<Staff>())
+        {
+            if (!peep->isWorker())
+                continue;
+
+            const bool assignmentNamesThisRide = peep->currentRide == id;
+            const bool deferredNamesThisRide = peep->hasDeferredAssignment && peep->deferredAssignment == id;
+            const bool tripNamesThisRide = peep->breakTripRoom == id;
+            const bool homeNamesThisRide = peep->breakRoom == id;
+            if (!assignmentNamesThisRide && !deferredNamesThisRide && !tripNamesThisRide && !homeNamesThisRide)
+                continue;
+
+            if (deferredNamesThisRide)
+            {
+                peep->deferredAssignment = RideId::GetNull();
+                peep->hasDeferredAssignment = false;
+            }
+            if (tripNamesThisRide)
+            {
+                peep->breakTripRoom = RideId::GetNull();
+                peep->breakDepartureTick = 0;
+            }
+            if (homeNamesThisRide)
+            {
+                // His break room is gone: the home falls back to Nearest.
+                peep->breakRoom = RideId::GetNull();
+            }
+            // A worker resting inside THIS ride (a break room being
+            // demolished under him) must come out even if the field that
+            // named the ride was only his break-room home.
+            const auto* restingRoom = peep->state == PeepState::onBreak
+                ? RideStaffing::GetBreakRoomAtTile(CoordsXY{ peep->x, peep->y })
+                : nullptr;
+            const bool restingInThisRide = restingRoom != nullptr && restingRoom->id == id;
+
+            if (assignmentNamesThisRide)
+            {
+                peep->currentRide = RideId::GetNull();
+                peep->currentRideStation = StationIndex::GetNull();
+                // An egress in flight dies with its ride: the deferred
+                // switch it was carrying can never be applied now.
+                peep->deferredAssignment = RideId::GetNull();
+                peep->hasDeferredAssignment = false;
+
+                if (peep->state == PeepState::fixing || peep->state == PeepState::inspecting)
+                {
+                    // Already relocated by the staff loop above; only
+                    // the assignment needed clearing.
+                    continue;
+                }
+
+                if (peep->state == PeepState::onBreak && !restingInThisRide)
+                {
+                    // Resting inside a different ride's break room: he
+                    // is somewhere safe, so clearing the assignment is
+                    // enough - do not drag him out of the room.
+                    continue;
+                }
+
+                if (peep->state == PeepState::patrolling)
+                {
+                    // Already standing on the path network somewhere;
+                    // only the assignment needed clearing.
+                    continue;
+                }
+            }
+            else if (!restingInThisRide)
+            {
+                continue;
+            }
+
+            // At post, en route, egressing, or resting inside THIS ride
+            // (a demolished break room): put him at the exit like the
+            // guests and staff above.
+            if (exitPosition.direction == kInvalidDirection)
+            {
+                CoordsXYZ newLoc = { peep->nextLoc.toTileCentre(), peep->nextLoc.z };
+                if (peep->getNextIsSloped())
+                    newLoc.z += kCoordsZStep;
+                newLoc.z++;
+                peep->moveTo(newLoc);
+            }
+            else
+            {
+                peep->moveTo(exitPosition);
+                peep->orientation = exitPosition.direction;
+            }
+
+            peep->state = PeepState::falling;
+            peep->subState = 0;
+            peep->switchToSpecialSprite(0);
+
+            peep->windowInvalidateFlags |= PEEP_INVALIDATE_PEEP_STATS;
         }
         numRiders = 0;
         slideInUse = 0;

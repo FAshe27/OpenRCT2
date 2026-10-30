@@ -3935,6 +3935,12 @@ namespace OpenRCT2
         if (ride == nullptr)
             return;
 
+        // Post-breakdown test trains (fix round 5): the front guest
+        // waits while the ride proves its fix with empty trains;
+        // boarding resumes when the ride flips back to open.
+        if (ride->isPostBreakdownTesting())
+            return;
+
         if (ride->getRideTypeDescriptor().flags.has(RtdFlag::noVehicles))
         {
             if (ride->status != RideStatus::open || ride->vehicleChangeTimeout != 0 || (++rejoinQueueTimeout) == 0)
@@ -5660,7 +5666,7 @@ namespace OpenRCT2
             return;
         }
         auto ride = GetRide(currentRide);
-        if (ride == nullptr || ride->status != RideStatus::open)
+        if (ride == nullptr || (ride->status != RideStatus::open && !ride->isPostBreakdownTesting()))
         {
             removeFromQueue();
             setState(PeepState::one);

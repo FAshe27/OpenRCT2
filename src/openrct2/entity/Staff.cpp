@@ -758,14 +758,6 @@ namespace OpenRCT2
      */
     bool Staff::doMechanicPathFinding()
     {
-        // Two-tier breakdowns: on a parts run the mechanic walks the path
-        // network to a goal the stock ride-bound logic does not know
-        // (outbound: the park entrance; return: this ride's station).
-        if (isOnPartsRun())
-        {
-            return doPartsRunPathFinding();
-        }
-
         uint8_t validDirections = getValidPatrolDirections(nextLoc);
         Direction newDirection = kInvalidDirection;
         if (getNextIsSurface())
@@ -3046,32 +3038,20 @@ namespace OpenRCT2
         PEEP_FIXING_FINISH_FIX_OR_INSPECT = 13,
         PEEP_FIXING_LEAVE_BY_ENTRANCE_EXIT = 14,
 
-        // Two-tier breakdowns, major tier: the parts run, inside fixing.
-        // Values sit above every stock substate - subState streams raw in
-        // saves, so stock values never move. The detour is entered
-        // deliberately from updateFixing's advancement logic, never by
-        // mask order alone (see kFixingPartsRunSubstates).
-        PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS = 15,
-        PEEP_FIXING_GO_TO_PARTS = 16,
-        PEEP_FIXING_FETCH_PARTS = 17,
-        PEEP_FIXING_RETURN_FROM_PARTS = 18,
-        PEEP_FIXING_REENTER_STATION = 19,
+        // Two-tier breakdowns, major tier (fix round 5): the extended
+        // fix dwell, inside fixing. The value sits above every stock
+        // substate - subState streams raw in saves, so stock values
+        // never move. The dwell is entered deliberately from
+        // updateFixing's advancement logic, never by mask order alone.
+        // (Values 16-19 were round 4's parts run, retired in round 5;
+        // a mechanic saved mid-parts-run loads with one of them and
+        // updateFixing folds it into the dwell - see there.)
+        PEEP_FIXING_FIX_MAJOR_DWELL = 15,
     };
 
-    // The parts-run detour substates, OR-ed into a breakdown's sequence
-    // mask when the breakdown is major (RideFlag::breakdownMajor). They
-    // sort above the stock substates, so mask advancement on its own can
-    // never wander from a stock beat into the detour - and once the
-    // re-enter substate hands the sequence back to the remaining stock
-    // beats, advancement steps over the stock beats only, because the
-    // finish and leave substates (13, 14) end the job below them.
-    static constexpr uint32_t kFixingPartsRunSubstates = (1 << PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS)
-        | (1 << PEEP_FIXING_GO_TO_PARTS) | (1 << PEEP_FIXING_FETCH_PARTS) | (1 << PEEP_FIXING_RETURN_FROM_PARTS)
-        | (1 << PEEP_FIXING_REENTER_STATION);
-
-    // The substates that perform a fix, as opposed to moving, fetching or
-    // finishing: a major breakdown's parts run is entered when the first
-    // of these completes.
+    // The substates that perform a fix, as opposed to moving or
+    // finishing: a major breakdown's extended dwell is entered when
+    // the first of these completes.
     static bool FixingSubstateIsFixBeat(int32_t subState)
     {
         switch (subState)
@@ -3088,6 +3068,22 @@ namespace OpenRCT2
             default:
                 return false;
         }
+    }
+
+    // The first fix beat in a sequence mask: the dwell hands the
+    // sequence back by anchoring here, so updateFixing's advancement
+    // scan lands on the stock beat that follows it (the same re-entry
+    // shape round 4's parts run used).
+    static int32_t FirstFixBeatSubstate(uint32_t stockMask)
+    {
+        for (int32_t candidate = 0; candidate <= PEEP_FIXING_LEAVE_BY_ENTRANCE_EXIT; candidate++)
+        {
+            if ((stockMask & (1 << candidate)) != 0 && FixingSubstateIsFixBeat(candidate))
+            {
+                return candidate;
+            }
+        }
+        return PEEP_FIXING_ENTER_STATION;
     }
 
     /**
@@ -3185,6 +3181,16 @@ namespace OpenRCT2
             return;
         }
 
+        // Fix round 5 legacy fold: subState streams raw in saves, so a
+        // mechanic saved during round 4's parts run loads with subState
+        // 16-19, which no longer exist. Fold them into the dwell that
+        // replaced the run: the mechanic finishes the job on site
+        // instead of wedging on an invalid substate.
+        if (subState > PEEP_FIXING_FIX_MAJOR_DWELL && subState <= 19)
+        {
+            subState = PEEP_FIXING_FIX_MAJOR_DWELL;
+        }
+
         bool progressToNextSubstate = true;
         bool firstRun = true;
 
@@ -3251,24 +3257,8 @@ namespace OpenRCT2
                     progressToNextSubstate = updateFixingLeaveByEntranceExit(firstRun, *ride);
                     break;
 
-                case PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS:
-                    progressToNextSubstate = updateFixingLeavePlatformForParts(firstRun, *ride);
-                    break;
-
-                case PEEP_FIXING_GO_TO_PARTS:
-                    progressToNextSubstate = updateFixingGoToParts(firstRun);
-                    break;
-
-                case PEEP_FIXING_FETCH_PARTS:
-                    progressToNextSubstate = updateFixingFetchParts(firstRun);
-                    break;
-
-                case PEEP_FIXING_RETURN_FROM_PARTS:
-                    progressToNextSubstate = updateFixingReturnFromParts(firstRun, *ride);
-                    break;
-
-                case PEEP_FIXING_REENTER_STATION:
-                    progressToNextSubstate = updateFixingReenterStation(firstRun, *ride);
+                case PEEP_FIXING_FIX_MAJOR_DWELL:
+                    progressToNextSubstate = updateFixingFixMajorDwell(firstRun, *ride);
                     break;
 
                 default:
@@ -3289,26 +3279,26 @@ namespace OpenRCT2
             if (state != PeepState::inspecting)
             {
                 sub_state_sequence_mask = FixingSubstatesForBreakdown[EnumValue(ride->breakdownReasonPending)];
-                if (ride->flags.has(RideFlag::breakdownMajor))
-                {
-                    sub_state_sequence_mask |= kFixingPartsRunSubstates;
-                }
             }
 
-            // Two-tier breakdowns: on a major breakdown the first fix
-            // beat is followed by the parts run, not by the remaining
-            // stock beats. The detour substates sort above the stock
-            // ones, so the mask scan below would step past the remaining
-            // beats first - enter the detour deliberately instead. Once
-            // the parts are fetched (RideFlag::breakdownPartsFetched,
-            // set by the re-enter substate) the stock sequence resumes
-            // and this cannot fire again; on a minor breakdown the tier
-            // bit is unset and the sequence is stock, byte for byte.
+            // Two-tier breakdowns (fix round 5): on a major breakdown
+            // the first fix beat is followed by the extended dwell, not
+            // by the remaining stock beats. The dwell substate sorts
+            // above the stock ones, so the mask scan below would step
+            // past the remaining beats first - enter the dwell
+            // deliberately instead. Once the dwell is served
+            // (RideFlag::breakdownMajorDwellDone, set by the dwell
+            // handler) the stock sequence resumes and this cannot fire
+            // again; on a minor breakdown the tier bit is unset and the
+            // sequence is stock, byte for byte. Round 4 sent the
+            // mechanic to the park entrance for parts at this point;
+            // the walk was retired in favour of time at the ride, which
+            // reads the same in a small park and a large one.
             if (state == PeepState::fixing && ride->flags.has(RideFlag::breakdownMajor)
-                && !ride->flags.has(RideFlag::breakdownPartsFetched) && subState < PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS
+                && !ride->flags.has(RideFlag::breakdownMajorDwellDone) && subState < PEEP_FIXING_FIX_MAJOR_DWELL
                 && FixingSubstateIsFixBeat(subState))
             {
-                subState = PEEP_FIXING_LEAVE_PLATFORM_FOR_PARTS;
+                subState = PEEP_FIXING_FIX_MAJOR_DWELL;
                 continue;
             }
 
@@ -3843,351 +3833,57 @@ namespace OpenRCT2
         return false;
     }
 
-    // The parts source for a major breakdown's parts run (two-tier
-    // breakdowns): the park entrance nearest to hand. It always exists
-    // and is pathable by definition - staff spawn there - so v1 needs no
-    // placeable workshop and no new save state for the destination.
-    static std::optional<TileCoordsXYZD> GetNearestParkEntrance(const CoordsXY& from)
-    {
-        std::optional<TileCoordsXYZD> best;
-        int64_t bestDistance = 0;
-        const auto fromTile = TileCoordsXY{ from };
-        for (const auto& entrance : getGameState().park.entrances)
-        {
-            const int64_t dx = entrance.x - fromTile.x;
-            const int64_t dy = entrance.y - fromTile.y;
-            const int64_t distance = dx * dx + dy * dy;
-            if (!best.has_value() || distance < bestDistance)
-            {
-                best = entrance;
-                bestDistance = distance;
-            }
-        }
-        return best;
-    }
-
-    bool Staff::isOnPartsRun() const
-    {
-        return state == PeepState::fixing && (subState == PEEP_FIXING_GO_TO_PARTS || subState == PEEP_FIXING_RETURN_FROM_PARTS);
-    }
-
-    // Pathfinding for the parts run's two network walks, modelled on the
-    // worker post-trip pair (doWorkerPathFinding / workerDirectionPath):
-    // same step choice, same destination tolerance draw as every other
-    // staff trip - the run adds no new random expressions, it reuses the
-    // staff pathfinding vocabulary wholesale.
-    bool Staff::doPartsRunPathFinding()
-    {
-        uint8_t validDirections = getValidPatrolDirections(nextLoc);
-        Direction newDirection = kInvalidDirection;
-        if (getNextIsSurface())
-        {
-            newDirection = mechanicDirectionSurface();
-        }
-        else
-        {
-            auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ nextLoc });
-            if (pathElement == nullptr)
-                return true;
-
-            newDirection = partsRunDirectionPath(validDirections, pathElement);
-        }
-
-        assert(DirectionValid(newDirection));
-
-        CoordsXY chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
-
-        while (!MapIsLocationValid(chosenTile))
-        {
-            newDirection = mechanicDirectionSurface();
-            chosenTile = CoordsXY{ nextLoc } + CoordsDirectionDelta[newDirection];
-        }
-
-        peepDirection = newDirection;
-        auto tolerance = (ScenarioRand() & 7) + 2;
-        setDestination(chosenTile + CoordsXY{ 16, 16 }, tolerance);
-
-        return false;
-    }
-
-    Direction Staff::partsRunDirectionPath(uint8_t validDirections, PathElement* pathElement)
-    {
-        uint32_t pathDirections = pathElement->getEdges();
-        pathDirections &= validDirections;
-
-        if (pathDirections == 0)
-        {
-            return mechanicDirectionSurface();
-        }
-
-        // Check if this is dead end - i.e. only way out is the reverse direction.
-        pathDirections &= ~(1 << DirectionReverse(peepDirection));
-        if (pathDirections == 0)
-        {
-            pathDirections |= (1 << DirectionReverse(peepDirection));
-        }
-
-        Direction direction = Numerics::bitScanForward(pathDirections);
-        pathDirections &= ~(1 << direction);
-        if (pathDirections == 0)
-        {
-            return direction;
-        }
-
-        pathDirections |= (1 << direction);
-
-        // The goal: outbound, the parts source (the nearest park
-        // entrance); returning, the assigned ride's station exit, or its
-        // entrance when the station has no separate exit - the same goal
-        // the stock mechanic pathfinding walks to.
-        std::optional<TileCoordsXYZ> goalPos;
-        if (subState == PEEP_FIXING_GO_TO_PARTS)
-        {
-            if (const auto entrance = GetNearestParkEntrance(CoordsXY{ x, y }); entrance.has_value())
-            {
-                goalPos = TileCoordsXYZ{ entrance.value() };
-            }
-        }
-        else if (auto* ride = GetRide(currentRide); ride != nullptr)
-        {
-            TileCoordsXYZD location = ride->getStation(currentRideStation).exit;
-            if (location.isNull())
-            {
-                location = ride->getStation(currentRideStation).entrance;
-            }
-            if (!location.isNull())
-            {
-                goalPos = TileCoordsXYZ{ location };
-            }
-        }
-
-        if (!goalPos.has_value())
-        {
-            return mechanicDirectionPathRand(pathDirections);
-        }
-
-        Direction pathfindDirection = PathFinding::ChooseDirection(
-            TileCoordsXYZ{ nextLoc }, goalPos.value(), *this, false, RideId::GetNull());
-        if (pathfindDirection == kInvalidDirection)
-        {
-            /* Heuristic search failed for all directions: reset the goal
-             * so the next call retries fresh, as in mechanicDirectionPath. */
-            resetPathfindGoal();
-            return mechanicDirectionPathRand(pathDirections);
-        }
-
-        return pathfindDirection;
-    }
-
     /**
-     * fixing SubState (major tier): leave_platform_for_parts - walk to
-     * the station exit's inner point (the stock move-to-exit handler),
-     * then step onto the path element in the exit tile, the same snap a
-     * guest leaving the ride gets (and the worker egress uses). Stock's
-     * leave_by_entrance_exit cannot serve here: it ends the fixing
-     * state, and the parts run must stay in fixing or the ride-side
-     * status update would re-call a second mechanic mid-run.
+     * fixing SubState (major tier, fix round 5): fix_major_dwell - the
+     * extended on-site fix that replaced round 4's parts run. The
+     * mechanic stays where the first fix beat left him, working, while
+     * the ride's dwell budget counts down; the budget lives on the
+     * ride (Ride::majorFixDwellRemaining), so a mechanic fired
+     * mid-dwell is replaced by one who restarts the sequence, reaches
+     * the dwell, and serves only the REMAINING ticks - and the
+     * streamed dwell-done bit means a replacement arriving after the
+     * dwell never serves it twice. The budget is (re-)derived from the
+     * ride's streamed band bits whenever it reads zero with the dwell
+     * unserved, which is also what makes a save/load mid-dwell benign:
+     * the runtime budget resets, the handler re-derives the full band,
+     * and the major simply gets a fresh full dwell.
      */
-    bool Staff::updateFixingLeavePlatformForParts(bool firstRun, const Ride& ride)
+    bool Staff::updateFixingFixMajorDwell(bool firstRun, Ride& ride)
     {
-        if (!updateFixingMoveToStationExit(firstRun, ride))
-        {
-            return false;
-        }
-
-        // At the exit's inner point: step onto the exit tile's path.
-        for (auto* pathElement : TileElementsView<PathElement>(CoordsXY{ x, y }))
-        {
-            int32_t height = MapHeightFromSlope(CoordsXY{ x, y }, pathElement->getSlopeDirection(), pathElement->isSloped());
-            height += pathElement->getBaseZ();
-            const int32_t zDiff = z - height;
-            if (zDiff > 0 || zDiff < -16)
-                continue;
-            moveTo({ x, y, height });
-            resetPathfindGoal();
-            return true;
-        }
-
-        // The exit tile's path is gone (deleted under the exit): stock
-        // recovery - the ride re-calls and a mechanic restarts the job.
-        setState(PeepState::falling);
-        return false;
-    }
-
-    /**
-     * fixing SubState (major tier): go_to_parts - walk the path network
-     * to the parts source (the nearest park entrance). Movement is
-     * performNextAction with doPartsRunPathFinding choosing the steps;
-     * arrival is the entrance tile test, re-checked every tick like the
-     * stall post arrival. The give-up timer is the answering one: a
-     * mechanic who cannot get there falls back and the ride re-calls,
-     * restarting the job - never wedged in the substate.
-     */
-    bool Staff::updateFixingGoToParts(bool firstRun)
-    {
-        if (!firstRun)
-        {
-            mechanicTimeSinceCall = 0;
-            resetPathfindGoal();
-        }
-
-        mechanicTimeSinceCall++;
-        if (mechanicTimeSinceCall > 2500)
-        {
-            setState(PeepState::falling);
-            return false;
-        }
-
-        const auto entrance = GetNearestParkEntrance(CoordsXY{ x, y });
-        if (!entrance.has_value())
-        {
-            // No park entrance exists (a degenerate park - staff spawn
-            // there, so it should not happen): abandon the run.
-            setState(PeepState::falling);
-            return false;
-        }
-
-        if (TileCoordsXY{ CoordsXY{ x, y } } == TileCoordsXY{ entrance->x, entrance->y })
-        {
-            return true;
-        }
-
-        if (!checkForPath())
-            return false;
-
-        if (shouldWaitForLevelCrossing())
-            return false;
-
-        performNextAction();
-        return false;
-    }
-
-    /**
-     * fixing SubState (major tier): fetch_parts - dwell at the parts
-     * source, fetching. Frame-driven like every other fix beat: the
-     * dwell lasts one staffFixGround animation.
-     */
-    bool Staff::updateFixingFetchParts(bool firstRun)
-    {
-        if (!firstRun)
+        if (!firstRun || isActionWalking())
         {
             orientation = peepDirection << 3;
-            action = PeepActionType::staffFixGround;
+            action = PeepActionType::staffFix;
             animationFrameNum = 0;
             animationImageIdOffset = 0;
             updateCurrentAnimationType();
-        }
 
-        if (isActionWalking())
-        {
-            return true;
+            if (ride.majorFixDwellRemaining == 0 && !ride.flags.has(RideFlag::breakdownMajorDwellDone))
+            {
+                ride.majorFixDwellRemaining = RideMajorFixDwellTicks(ride);
+            }
         }
 
         updateAction();
         invalidate();
-        return false;
-    }
 
-    /**
-     * fixing SubState (major tier): return_from_parts - walk the path
-     * network back to the ride's station. Arrival is the entrance/exit
-     * element interaction, the same test updateAnswering uses, and hands
-     * over to the re-enter substate with the platform destination set,
-     * exactly as the answering trip into fixing does.
-     */
-    bool Staff::updateFixingReturnFromParts(bool firstRun, const Ride& ride)
-    {
-        if (!firstRun)
+        if (ride.majorFixDwellRemaining > 0)
         {
-            mechanicTimeSinceCall = 0;
-            resetPathfindGoal();
+            ride.majorFixDwellRemaining--;
         }
 
-        mechanicTimeSinceCall++;
-        if (mechanicTimeSinceCall > 2500)
-        {
-            setState(PeepState::falling);
-            return false;
-        }
-
-        if (!checkForPath())
-            return false;
-
-        if (shouldWaitForLevelCrossing())
-            return false;
-
-        const auto [pathingResult, rideEntranceExitElement] = performNextAction();
-        if (!(pathingResult & PATHING_RIDE_EXIT) && !(pathingResult & PATHING_RIDE_ENTRANCE))
+        if (ride.majorFixDwellRemaining > 0)
         {
             return false;
         }
 
-        if (currentRide != rideEntranceExitElement->asEntrance()->getRideIndex())
-            return false;
-
-        StationIndex exitIndex = rideEntranceExitElement->asEntrance()->getStationIndex();
-        if (currentRideStation != exitIndex)
-            return false;
-
-        if (pathingResult & PATHING_RIDE_ENTRANCE)
-        {
-            if (!ride.getStation(exitIndex).exit.isNull())
-            {
-                return false;
-            }
-        }
-
-        peepDirection = rideEntranceExitElement->getDirection();
-
-        int32_t destX = nextLoc.x + 16 + DirectionOffsets[peepDirection].x * 53;
-        int32_t destY = nextLoc.y + 16 + DirectionOffsets[peepDirection].y * 53;
-
-        setDestination({ destX, destY }, 2);
-        orientation = peepDirection << 3;
-
-        z = rideEntranceExitElement->baseHeight * 4;
-        subState = PEEP_FIXING_REENTER_STATION;
-        return false;
-    }
-
-    /**
-     * fixing SubState (major tier): reenter_station - walk from the
-     * station entrance/exit onto the platform (the answering trip's
-     * step-in shape), then hand the sequence back to the stock beats
-     * that remain: the parts are marked fetched on the ride, and the
-     * substate is set to the breakdown's first fix beat, so the
-     * advancement scan in updateFixing lands on the next stock substate
-     * after it and the job finishes exactly as a minor one does from
-     * there - same remaining beats, same finish, same leave.
-     */
-    bool Staff::updateFixingReenterStation(bool firstRun, Ride& ride)
-    {
-        int16_t delta_y = abs(y - getDestination().y);
-        if (auto loc = updateAction(); loc.has_value())
-        {
-            auto newZ = ride.getStation(currentRideStation).getBaseZ();
-            if (delta_y < 20)
-            {
-                newZ += ride.getRideTypeDescriptor().Heights.PlatformHeight;
-            }
-
-            moveTo({ loc.value(), newZ });
-            return false;
-        }
-
-        ride.flags.set(RideFlag::breakdownPartsFetched);
-
-        const uint32_t stockMask = FixingSubstatesForBreakdown[EnumValue(ride.breakdownReasonPending)];
-        int32_t firstBeat = PEEP_FIXING_ENTER_STATION;
-        for (int32_t candidate = 0; candidate <= PEEP_FIXING_LEAVE_BY_ENTRANCE_EXIT; candidate++)
-        {
-            if ((stockMask & (1 << candidate)) != 0 && FixingSubstateIsFixBeat(candidate))
-            {
-                firstBeat = candidate;
-                break;
-            }
-        }
-        subState = firstBeat;
+        // Dwell served: mark it on the ride and hand the sequence back
+        // anchored at the breakdown's first fix beat, so the
+        // advancement scan in updateFixing lands on the next stock
+        // beat and the job finishes exactly as a minor one does from
+        // there - same remaining beats, same finish, same leave.
+        ride.flags.set(RideFlag::breakdownMajorDwellDone);
+        subState = FirstFixBeatSubstate(FixingSubstatesForBreakdown[EnumValue(ride.breakdownReasonPending)]);
         return true;
     }
 

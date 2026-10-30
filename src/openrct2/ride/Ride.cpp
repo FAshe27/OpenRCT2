@@ -878,6 +878,8 @@ namespace OpenRCT2
 
         updateMorningTestRun();
 
+        updatePostBreakdownTestRun();
+
         updatePendingOpen();
 
         // If ride is simulating but crashed, reset the vehicles
@@ -1038,6 +1040,166 @@ namespace OpenRCT2
             morningTestState = MorningTestState::idle;
             status = RideStatus::open;
             windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+        }
+    }
+
+    /**
+     * Post-breakdown test trains (fix round 5).
+     *
+     * Real parks do not board guests straight after a serious repair:
+     * the ride sends a few empty trains around first to prove the fix.
+     * A MAJOR breakdown's fix therefore ends in the stock
+     * RideStatus::testing state for 2 or 3 empty dispatches (the count
+     * came off the breakdown roll; see RideBreakdownUpdate), after
+     * which the ride flips itself back to open. Testing status holds
+     * boarding on every guest path, and RideSetStatusAction cancels the
+     * machine on any manual status change, exactly like the morning
+     * test run above.
+     *
+     * Gates (otherwise the ride simply reopens): a real track ride that
+     * supports the stock test mode, with trains actually on track; not
+     * crashed; station synchronisation OFF (same reasoning as the
+     * morning test: a synced partner treats a testing ride as ready to
+     * depart, so the test dispatches could not be proven isolated from
+     * a loaded partner's departure logic). Flat rides and other
+     * trainless rides never arm - test trains are a tracked-ride
+     * ritual in this version, for majors and minors alike (minors never
+     * reach this function at all).
+     *
+     * Counting is by whole dispatches, observed the morning test's way
+     * (every train home vs any train away) - NOT via the per-train
+     * lifetimeCycles counters, which count station arrivals: on a
+     * multi-station ride one lap is several arrivals, so a cycles
+     * threshold would end the ritual mid-lap on exactly the rides
+     * where it matters. The requirement is N completed dispatches
+     * TOTAL across the ride's trains, which is what "send two or three
+     * empty trains" means in play; per-train N on a four-train coaster
+     * would hold boarding for a dozen laps. The first departure only
+     * counts once the fleet has been seen fully home after the fix, so
+     * the stranded trains' recovery lap (which may still carry their
+     * passengers home) is never mistaken for a test dispatch - and a
+     * train cannot depart again without unloading first, so every
+     * counted dispatch is an empty one.
+     *
+     * Determinism: no ScenarioRand draws, no persisted fields - the
+     * state is runtime-only (see Ride.h) and the flip to open happens
+     * in the per-tick simulation, identically on every client, like
+     * the morning test's.
+     */
+    bool Ride::tryArmPostBreakdownTestRun(uint8_t testTrains)
+    {
+        if (postBreakdownTestState != PostBreakdownTestState::idle)
+            return false;
+        if (gLegacyScene != LegacyScene::playing)
+            return false;
+
+        const auto& rtd = getRideTypeDescriptor();
+        if (!rtd.flags.has(RtdFlag::hasTrack) || !supportsStatus(RideStatus::testing))
+            return false;
+        if (!flags.has(RideFlag::onTrack) || numTrains == 0)
+            return false;
+        if (flags.has(RideFlag::crashed))
+            return false;
+        if (departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS)
+            return false;
+
+        postBreakdownTestCircuitsRemaining = testTrains;
+        postBreakdownTestTicks = 0;
+        postBreakdownTestState = PostBreakdownTestState::awaitingFleetHome;
+        status = RideStatus::testing;
+        windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+        return true;
+    }
+
+    void Ride::cancelPostBreakdownTestRun()
+    {
+        postBreakdownTestState = PostBreakdownTestState::idle;
+    }
+
+    bool Ride::isPostBreakdownTesting() const
+    {
+        return postBreakdownTestState != PostBreakdownTestState::idle;
+    }
+
+    void Ride::updatePostBreakdownTestRun()
+    {
+        if (postBreakdownTestState == PostBreakdownTestState::idle)
+            return;
+
+        // Failsafes: any status change we did not make (the player
+        // closed or re-tested the ride, another workflow took over)
+        // disarms the machine - RideSetStatusAction also cancels
+        // explicitly - and a hard tick cap guarantees boarding can
+        // never be held forever by a fleet that never reads as "home"
+        // (e.g. a continuous-circuit ride whose trains are never all
+        // at stations in the same tick). 12,000 ticks is five minutes
+        // at kGameUpdateFPS 40, far beyond any real test ritual.
+        if (status != RideStatus::testing || ++postBreakdownTestTicks > 12000)
+        {
+            postBreakdownTestState = PostBreakdownTestState::idle;
+            if (status == RideStatus::testing)
+            {
+                status = RideStatus::open;
+                windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+            }
+            return;
+        }
+
+        // A train counts as "home" while it is at a station being
+        // (un)loaded or held ready to depart; anything else means a
+        // dispatch is still in progress. (The morning test's test,
+        // verbatim in shape.)
+        bool anyTrainAway = false;
+        for (uint8_t i = 0; i < numTrains; i++)
+        {
+            const Vehicle* vehicle = getGameState().entities.getEntity<Vehicle>(vehicles[i]);
+            if (vehicle == nullptr)
+                continue;
+            switch (vehicle->status)
+            {
+                case Vehicle::Status::waitingForPassengers:
+                case Vehicle::Status::waitingToDepart:
+                case Vehicle::Status::unloadingPassengers:
+                    break;
+                default:
+                    anyTrainAway = true;
+                    break;
+            }
+            if (anyTrainAway)
+                break;
+        }
+
+        switch (postBreakdownTestState)
+        {
+            case PostBreakdownTestState::awaitingFleetHome:
+                // The stranded fleet must first be seen fully home;
+                // only departures after that are test dispatches.
+                if (!anyTrainAway)
+                    postBreakdownTestState = PostBreakdownTestState::awaitingDeparture;
+                break;
+            case PostBreakdownTestState::awaitingDeparture:
+                if (anyTrainAway)
+                    postBreakdownTestState = PostBreakdownTestState::running;
+                break;
+            case PostBreakdownTestState::running:
+                if (!anyTrainAway)
+                {
+                    if (postBreakdownTestCircuitsRemaining > 0)
+                        postBreakdownTestCircuitsRemaining--;
+                    if (postBreakdownTestCircuitsRemaining == 0)
+                    {
+                        postBreakdownTestState = PostBreakdownTestState::idle;
+                        status = RideStatus::open;
+                        windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list);
+                    }
+                    else
+                    {
+                        postBreakdownTestState = PostBreakdownTestState::awaitingDeparture;
+                    }
+                }
+                break;
+            default:
+                break;
         }
     }
 
@@ -1317,11 +1479,19 @@ namespace OpenRCT2
      *
      *  rct2: 0x006AC622
      */
-    // Two-tier breakdowns: whether a fresh breakdown is major (the
-    // parts-run tier). Only vehicleMalfunction, controlFailure and
-    // safetyCutOut can be major - restraint and door reasons read as
-    // platform-quick fixes and stay minor, and brakesFailure is never
-    // selected at all (see RideGetNewBreakdownProblem).
+    // Two-tier breakdowns: whether a fresh breakdown is major. Only
+    // vehicleMalfunction, controlFailure and safetyCutOut can be major
+    // - restraint and door reasons read as platform-quick fixes and
+    // stay minor, and brakesFailure is never selected at all (see
+    // RideGetNewBreakdownProblem).
+    //
+    // Bit allocation for the captured 22-bit breakdown roll (fix
+    // round 5): bits 0-1 are the severity read below ((roll & 3) == 0
+    // is major, ~25% of eligible breakdowns); bits 2-3 are the major's
+    // long-fix band and bit 4 its extra test train - both read at the
+    // RideBreakdownUpdate call site and stored in the ride's streamed
+    // flag bits, so the whole tier package survives a save/load
+    // mid-breakdown with no format change and no extra draws.
     //
     // The tier is read off the breakdown roll RideBreakdownUpdate
     // already drew for this breakdown - zero extra ScenarioRand draws,
@@ -1421,7 +1591,26 @@ namespace OpenRCT2
         {
             auto breakdownReason = RideGetNewBreakdownProblem(ride);
             if (breakdownReason != Breakdown::none)
-                RidePrepareBreakdown(ride, breakdownReason, IsMajorBreakdown(breakdownReason, breakdownRoll));
+            {
+                const bool isMajor = IsMajorBreakdown(breakdownReason, breakdownRoll);
+                RidePrepareBreakdown(ride, breakdownReason, isMajor);
+                if (isMajor)
+                {
+                    // The major's long-fix band (roll bits 2-3) and its
+                    // test-train count (bit 4: set means 3 empty trains
+                    // after the fix, clear means 2) ride in the streamed
+                    // flag bits; the dwell budget in ticks is derived
+                    // from the band here and re-derivable after a load
+                    // (RideMajorFixDwellTicks).
+                    if (breakdownRoll & (1 << 2))
+                        ride.flags.set(RideFlag::breakdownMajorFixBandLow);
+                    if (breakdownRoll & (1 << 3))
+                        ride.flags.set(RideFlag::breakdownMajorFixBandHigh);
+                    if (breakdownRoll & (1 << 4))
+                        ride.flags.set(RideFlag::breakdownMajorExtraTestTrain);
+                    ride.majorFixDwellRemaining = RideMajorFixDwellTicks(ride);
+                }
+            }
         }
     }
 
@@ -1527,6 +1716,26 @@ namespace OpenRCT2
         }
     }
 
+    // Fix round 5: the major tier's extended fix, in ticks. The band
+    // comes off the breakdown roll (bits 2-3, stored in the streamed
+    // flag bits at the call site), and the dwell is served on site by
+    // the fixing mechanic (entity/Staff.cpp, PEEP_FIXING_FIX_MAJOR_DWELL)
+    // on top of the stock fix beats. kGameUpdateFPS is 40 (Game.h), so
+    // the four bands are 20 / 40 / 70 / 110 seconds of dwell; with the
+    // stock beats and the mechanic's travel, a major's total downtime
+    // lands between roughly 25 seconds and two minutes, where a minor
+    // keeps the stock few seconds.
+    uint32_t RideMajorFixDwellTicks(const Ride& ride)
+    {
+        constexpr uint32_t kBandTicks[4] = { 800, 1600, 2800, 4400 };
+        uint32_t band = 0;
+        if (ride.flags.has(RideFlag::breakdownMajorFixBandLow))
+            band |= 1;
+        if (ride.flags.has(RideFlag::breakdownMajorFixBandHigh))
+            band |= 2;
+        return kBandTicks[band];
+    }
+
     /**
      *
      *  rct2: 0x006B7348
@@ -1551,7 +1760,10 @@ namespace OpenRCT2
             ride.flags.set(RideFlag::breakdownMajor);
         else
             ride.flags.unset(RideFlag::breakdownMajor);
-        ride.flags.unset(RideFlag::breakdownPartsFetched);
+        ride.flags.unset(
+            RideFlag::breakdownPartsFetched, RideFlag::breakdownMajorFixBandLow, RideFlag::breakdownMajorFixBandHigh,
+            RideFlag::breakdownMajorExtraTestTrain, RideFlag::breakdownMajorDwellDone);
+        ride.majorFixDwellRemaining = 0;
 
         ride.breakdownReasonPending = breakdownReason;
         ride.breakdownSoundModifier = 0;
@@ -1723,7 +1935,10 @@ namespace OpenRCT2
                     // RideFixBreakdown).
                     ride.flags.unset(
                         RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection, RideFlag::breakdownMajor,
-                        RideFlag::breakdownPartsFetched);
+                        RideFlag::breakdownPartsFetched, RideFlag::breakdownMajorFixBandLow,
+                        RideFlag::breakdownMajorFixBandHigh, RideFlag::breakdownMajorExtraTestTrain,
+                        RideFlag::breakdownMajorDwellDone);
+                    ride.majorFixDwellRemaining = 0;
                     break;
                 }
 
@@ -4741,10 +4956,15 @@ namespace OpenRCT2
     {
         // The breakdown is over: its tier bits clear with it (two-tier
         // breakdowns) - the next breakdown re-derives its tier at
-        // RidePrepareBreakdown.
+        // RidePrepareBreakdown. The tier is captured first: a major's
+        // fix is followed by empty test trains (fix round 5).
+        const bool wasMajor = ride.flags.has(RideFlag::breakdownMajor);
+        const uint8_t majorTestTrains = ride.flags.has(RideFlag::breakdownMajorExtraTestTrain) ? 3 : 2;
         ride.flags.unset(
             RideFlag::breakdownPending, RideFlag::brokenDown, RideFlag::dueInspection, RideFlag::breakdownMajor,
-            RideFlag::breakdownPartsFetched);
+            RideFlag::breakdownPartsFetched, RideFlag::breakdownMajorFixBandLow, RideFlag::breakdownMajorFixBandHigh,
+            RideFlag::breakdownMajorExtraTestTrain, RideFlag::breakdownMajorDwellDone);
+        ride.majorFixDwellRemaining = 0;
         ride.windowInvalidateFlags.set(RideInvalidateFlag::main, RideInvalidateFlag::list, RideInvalidateFlag::maintenance);
 
         if (ride.flags.has(RideFlag::onTrack))
@@ -4762,6 +4982,14 @@ namespace OpenRCT2
 
         uint8_t unreliability = 100 - ride.reliabilityPercentage;
         ride.reliability += reliabilityIncreaseFactor * (unreliability / 2);
+
+        // Post-breakdown test trains (fix round 5): only a fix that
+        // leaves the ride open can run them - a ride the player closed
+        // mid-breakdown just stays closed.
+        if (wasMajor && ride.status == RideStatus::open)
+        {
+            ride.tryArmPostBreakdownTestRun(majorTestTrains);
+        }
     }
 
     /**

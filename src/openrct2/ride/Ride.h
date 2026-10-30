@@ -134,13 +134,29 @@ namespace OpenRCT2
         fixedRatings,       // When set, the ratings will not be updated (useful for hacked rides).
         randomShopColours,
         reversedTrains,
-        // Two-tier breakdowns: this breakdown is major (the parts-run
-        // tier), and the parts have been fetched. Both live in the flags
-        // field ParkFile already streams, so the tier survives a
-        // save/load mid-breakdown with no format change. Set at
-        // RidePrepareBreakdown; cleared by RideFixBreakdown.
+        // Two-tier breakdowns: this breakdown is major. The bit lives
+        // in the flags field ParkFile already streams, so the tier
+        // survives a save/load mid-breakdown with no format change. Set
+        // at RidePrepareBreakdown; cleared by RideFixBreakdown.
         breakdownMajor,
+        // Round 4's parts-run bit. The parts run was retired in fix
+        // round 5 (majors are long on-site fixes now); the enumerator
+        // stays so the bit position keeps its place in the streamed
+        // flags word, defined-but-unused - nothing sets it, and
+        // RideFixBreakdown still clears it so a round-4 save's stale
+        // bit dies with its first fixed breakdown.
         breakdownPartsFetched,
+        // Fix round 5, major tier: the long-fix band (two bits: low,
+        // high), the extra-test-train bit (clear: 2 test trains after
+        // the fix; set: 3), and the dwell-done bit (the extended fix
+        // has been served, so a replacement mechanic does not serve it
+        // again). All derive from the same breakdown roll as the tier
+        // (see RideBreakdownUpdate), live in the streamed flags word,
+        // and clear with the tier in RideFixBreakdown.
+        breakdownMajorFixBandLow,
+        breakdownMajorFixBandHigh,
+        breakdownMajorExtraTestTrain,
+        breakdownMajorDwellDone,
     };
     using RideFlags = FlagHolder<uint32_t, RideFlag>;
 
@@ -277,6 +293,18 @@ namespace OpenRCT2
     enum class MorningTestState : uint8_t
     {
         idle,
+        awaitingDeparture,
+        running,
+    };
+
+    // Post-breakdown test trains (fix round 5): after a MAJOR breakdown
+    // is fixed, a tracked ride runs 2-3 empty trains before boarding
+    // resumes. Runtime-only like the morning test state above; see
+    // Ride::tryArmPostBreakdownTestRun in Ride.cpp.
+    enum class PostBreakdownTestState : uint8_t
+    {
+        idle,
+        awaitingFleetHome,
         awaitingDeparture,
         running,
     };
@@ -481,6 +509,26 @@ namespace OpenRCT2
         MorningTestState morningTestState{ MorningTestState::idle };
         uint32_t morningTestLastDayIndex{ std::numeric_limits<uint32_t>::max() };
 
+        // Post-breakdown test trains (fix round 5): runtime-only, NEVER
+        // serialised, for the same reason as the morning-test fields
+        // above. A ride saved mid-test loads with the state idle and its
+        // status still testing (status IS serialised), so it simply
+        // stays in Test mode until the player opens it - the morning
+        // test's accepted degradation, mirrored deliberately.
+        PostBreakdownTestState postBreakdownTestState{ PostBreakdownTestState::idle };
+        uint8_t postBreakdownTestCircuitsRemaining{ 0 };
+        uint32_t postBreakdownTestTicks{ 0 };
+
+        // Major-tier long fix (fix round 5): ticks of extended dwell
+        // remaining for the current major breakdown, counted down by
+        // whichever mechanic is serving the dwell - so a replacement
+        // inherits the remainder exactly. Runtime-only: a save/load
+        // mid-fix resets it to zero and the dwell handler re-derives the
+        // full band from the streamed band bits (the major simply gets
+        // a fresh full dwell; the dwell-done bit, which IS streamed,
+        // still prevents a second serving after a completed dwell).
+        uint32_t majorFixDwellRemaining{ 0 };
+
         // Workers opening gate: the status (open or testing) the player last
         // requested for this ride while it waits for its minimum crew to
         // reach their posts; RideStatus::closed means no request is pending.
@@ -571,6 +619,16 @@ namespace OpenRCT2
         bool tryArmMorningTestRun();
         void cancelMorningTestRun();
         void updateMorningTestRun();
+
+        // Post-breakdown test trains (fix round 5): tryArm is called by
+        // RideFixBreakdown when the fixed breakdown was major; while
+        // armed the ride sits in RideStatus::testing and
+        // updatePostBreakdownTestRun (polled from update()) flips it
+        // back to open once the required empty dispatches complete.
+        bool tryArmPostBreakdownTestRun(uint8_t testTrains);
+        void cancelPostBreakdownTestRun();
+        void updatePostBreakdownTestRun();
+        bool isPostBreakdownTesting() const;
 
         // Workers opening gate: promotes a pending open/testing request once
         // the minimum crew is at post; polled from update().
@@ -899,6 +957,10 @@ namespace OpenRCT2
     int32_t RideInitialiseConstructionWindow(Ride& ride);
     void RideSetMapTooltip(const TileElement& tileElement);
     void RidePrepareBreakdown(Ride& ride, Breakdown breakdownReason, bool isMajor);
+    // Fix round 5: the major tier's extended-fix dwell, in ticks, read
+    // off the ride's streamed band bits (used by the fixing mechanic's
+    // dwell substate, including after a save/load re-derivation).
+    uint32_t RideMajorFixDwellTicks(const Ride& ride);
     TileElement* RideGetStationStartTrackElement(const Ride& ride, StationIndex stationIndex);
     TileElement* RideGetStationExitElement(const CoordsXYZ& elementPos);
     money64 RideGetRefundPrice(const Ride& ride);

@@ -157,6 +157,7 @@ namespace OpenRCT2::GameActions
                 }
 
                 ride->cancelMorningTestRun();
+                ride->cancelPostBreakdownTestRun();
                 // Closing cancels any pending open request (Workers gate).
                 ride->pendingOpenStatus = RideStatus::closed;
                 ride->status = RideStatus::closed;
@@ -180,6 +181,7 @@ namespace OpenRCT2::GameActions
                 }
 
                 ride->cancelMorningTestRun();
+                ride->cancelPostBreakdownTestRun();
                 ride->pendingOpenStatus = RideStatus::closed;
                 ride->status = _status;
                 ride->flags.unset(RideFlag::passStationNoStopping);
@@ -249,6 +251,7 @@ namespace OpenRCT2::GameActions
                     // A manual test is the player's own: never let a stale
                     // morning-test arm flip it open afterwards.
                     ride->cancelMorningTestRun();
+                    ride->cancelPostBreakdownTestRun();
                 }
                 else
                 {

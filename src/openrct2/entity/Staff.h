@@ -160,15 +160,9 @@ namespace OpenRCT2
         bool updateFixingFinishFixOrInspect(bool firstRun, int32_t steps, Ride& ride);
         bool updateFixingLeaveByEntranceExit(bool firstRun, const Ride& ride);
 
-        // Mechanics (two-tier breakdowns: the parts run inside fixing)
-        bool isOnPartsRun() const;
-        bool doPartsRunPathFinding();
-        Direction partsRunDirectionPath(uint8_t validDirections, PathElement* pathElement);
-        bool updateFixingLeavePlatformForParts(bool firstRun, const Ride& ride);
-        bool updateFixingGoToParts(bool firstRun);
-        bool updateFixingFetchParts(bool firstRun);
-        bool updateFixingReturnFromParts(bool firstRun, const Ride& ride);
-        bool updateFixingReenterStation(bool firstRun, Ride& ride);
+        // Mechanics (two-tier breakdowns: the major tier's extended
+        // on-site fix dwell inside fixing, fix round 5)
+        bool updateFixingFixMajorDwell(bool firstRun, Ride& ride);
         void updateRideInspected(RideId rideIndex);
         void updateHeadingToInspect();
 
