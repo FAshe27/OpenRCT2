@@ -354,9 +354,6 @@ namespace OpenRCT2::PathFinding
     // Set while CalculateNextDestinationDefault runs in capture mode and reaches a dead end; the dead-end checks
     // are left to the lane code, which knows whether the guest really is at a dead end.
     static bool _capturedDeadEnd = false;
-    // Set while CalculateNextDestinationDefault runs in capture mode and takes the only edge left, rather than choosing
-    // between edges (e.g. after the wide-edge strip); the lane code doesn't treat such a move as a routing choice.
-    static bool _capturedForced = false;
 
     /**
      *
@@ -2271,8 +2268,6 @@ namespace OpenRCT2::PathFinding
         {
             LogPathfinding(&peep, "Completed CalculateNextDestination - taking only direction available: %d.", direction);
 
-            if (_captureMoveDirection)
-                _capturedForced = true;
             return PeepMoveOneTile(direction, peep);
         }
 
@@ -2499,12 +2494,10 @@ namespace OpenRCT2::PathFinding
         Direction direction = kInvalidDirection;
         // The guest's only way on was back where they came from.
         bool deadEnd = false;
-        // There was only one way to go (no choice was made).
-        bool forced = false;
     };
 
     // Puts PeepMoveOneTile into capture mode and the guest at another tile for its lifetime, restoring all of it (and
-    // any capture already in progress) afterwards, the same way HypotheticalQuery does for the generator.
+    // any capture already in progress) afterwards.
     class CaptureScope
     {
     public:
@@ -2514,13 +2507,11 @@ namespace OpenRCT2::PathFinding
             , _wasCapturing(_captureMoveDirection)
             , _direction(_capturedMoveDirection)
             , _deadEnd(_capturedDeadEnd)
-            , _forced(_capturedForced)
         {
             _guest.nextLoc = loc.toCoordsXYZ();
             _captureMoveDirection = true;
             _capturedMoveDirection = kInvalidDirection;
             _capturedDeadEnd = false;
-            _capturedForced = false;
         }
 
         ~CaptureScope()
@@ -2529,7 +2520,6 @@ namespace OpenRCT2::PathFinding
             _captureMoveDirection = _wasCapturing;
             _capturedMoveDirection = _direction;
             _capturedDeadEnd = _deadEnd;
-            _capturedForced = _forced;
         }
 
         CaptureScope(const CaptureScope&) = delete;
@@ -2541,7 +2531,6 @@ namespace OpenRCT2::PathFinding
         bool _wasCapturing;
         Direction _direction;
         bool _deadEnd;
-        bool _forced;
     };
 
     // Returns the direction CalculateNextDestinationDefault chooses with the guest at loc, without moving them.
@@ -2551,7 +2540,7 @@ namespace OpenRCT2::PathFinding
         const auto result = CalculateNextDestinationDefault(peep);
         if (result != 0 || _capturedMoveDirection == kInvalidDirection)
             return std::nullopt;
-        return CapturedDecision{ _capturedMoveDirection, _capturedDeadEnd, _capturedForced };
+        return CapturedDecision{ _capturedMoveDirection, _capturedDeadEnd };
     }
 
     // Returns the flat, non-queue path element at the given tile and height, if guests can walk onto it.
