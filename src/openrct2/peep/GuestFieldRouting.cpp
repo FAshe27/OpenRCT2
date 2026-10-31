@@ -935,4 +935,18 @@ namespace OpenRCT2::PathFinding
         return true;
     }
 
+    bool GuestFieldDistance(const TileCoordsXYZ& goal, const TileCoordsXYZ& node, uint32_t& outDistance)
+    {
+        if (!NodePackable(node))
+        {
+            return false;
+        }
+        const FieldData* field = GetFieldForGoal(goal);
+        if (field == nullptr)
+        {
+            return false;
+        }
+        return FieldDistanceAt(*field, node, outDistance);
+    }
+
 } // namespace OpenRCT2::PathFinding

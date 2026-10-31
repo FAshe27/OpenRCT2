@@ -58,4 +58,9 @@ namespace OpenRCT2::PathFinding
     bool GuestFieldTryStep(
         Peep& peep, const TileCoordsXYZ& loc, const TileCoordsXYZ& goal, uint8_t permittedEdges, Direction& outDirection);
 
+    // Wide path lanes (personal fork): the field distance from node to goal, when goal's field is available and covers
+    // node. Read-only, like GuestFieldTryStep: no peep state is written and no ScenarioRand is drawn. May build the
+    // field, within the usual per-tick build budget.
+    bool GuestFieldDistance(const TileCoordsXYZ& goal, const TileCoordsXYZ& node, uint32_t& outDistance);
+
 } // namespace OpenRCT2::PathFinding

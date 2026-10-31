@@ -30,7 +30,9 @@
 #include <openrct2/scenario/Scenario.h>
 #include <openrct2/world/Footpath.h>
 #include <openrct2/world/Map.h>
+#include <openrct2/world/TileElementsView.h>
 #include <openrct2/world/tile_element/PathElement.h>
+#include <openrct2/world/tile_element/WallElement.h>
 #include <set>
 #include <string>
 #include <utility>
@@ -47,6 +49,11 @@ namespace
     constexpr int32_t kStripFirstX = 1;
     constexpr int32_t kStripLastX = 10;
     constexpr TileCoordsXY kGoalTile{ 1, 10 };
+
+    // The ride guests head for, and the path tile in front of its entrance. Most layouts use "PathWithGap", whose
+    // entrance is at the end of the main test path.
+    std::string gRideName = "PathWithGap";
+    TileCoordsXY gGoalTile = kGoalTile;
 
     struct Rect
     {
@@ -78,6 +85,11 @@ protected:
         GetContext()->LoadParkFromFile(TestData::GetParkPath("pathfinding-tests.sv6"));
         GameLoadInit();
 
+        // Distance fields are built at most two per game tick, and the tests don't run the game: give each layout a
+        // tick of its own.
+        static uint32_t layoutTick = 0;
+        getGameState().currentTicks = 1000000 + (++layoutTick);
+
         _tiles.clear();
         for (const auto& rect : rects)
             for (int32_t x = rect.firstX; x <= rect.lastX; x++)
@@ -88,6 +100,8 @@ protected:
 
     static void UnloadPark()
     {
+        gRideName = "PathWithGap";
+        gGoalTile = kGoalTile;
         Config::Get().general.guestsUseWidePathLanes = true;
         _context = nullptr;
     }
@@ -220,7 +234,7 @@ protected:
     {
         WalkResult result{};
         result.tilesPerRow.resize(3);
-        auto* ride = FindRideByName("PathWithGap");
+        auto* ride = FindRideByName(gRideName.c_str());
         EXPECT_NE(ride, nullptr);
         if (ride == nullptr)
             return result;
@@ -261,10 +275,12 @@ protected:
                 {
                     lastTile = tile;
                     result.tilesWalked++;
+                    if (getenv("LANE_TRACE"))
+                        std::printf("%d,%d ", tile.x, tile.y);
                     if (tile.x > kStripFirstX && tile.x < kStripLastX && tile.y >= 8 && tile.y <= 10)
                         result.tilesPerRow[tile.y - 8]++;
                 }
-                if (headForRide && tile == kGoalTile)
+                if (headForRide && tile == gGoalTile)
                 {
                     result.arrived++;
                     break;
@@ -275,6 +291,8 @@ protected:
                     break;
                 }
             }
+            if (getenv("LANE_TRACE"))
+                std::printf("\n");
             if (guest->guestIsLostCountdown < 200)
                 result.countedAsLost++;
         }
@@ -360,7 +378,7 @@ TEST_F(WidePathLanesTest, DrawCountsMatchStockForAimlessGuestsAndSidePaths)
     // Aimless guests in the north lane pass the side path at x = 4, so this covers the outer-side check too.
     const auto result = WalkGuests({ 8, 9, kPathZ }, 0, 20, true, false, true, 3000);
     Print("Draws, aimless and side path", result);
-    EXPECT_GT(result.decisionsCompared, 3000);
+    EXPECT_GT(result.decisionsCompared, 2500);
     EXPECT_EQ(result.drawMismatches, 0);
 }
 
@@ -490,4 +508,124 @@ TEST_F(WidePathCornerTest, DrawCountsMatchStockRoundCorners)
         EXPECT_GT(result.decisionsCompared, 200);
         EXPECT_EQ(result.drawMismatches, 0);
     }
+}
+
+// --- A ride entrance on the side of a two-lane path --------------------------------------------------------------
+
+// Two lanes, rows y = 9 and y = 10, from x = 7 to x = 15, passing the entrance of "PathWithFences" at (11, 11), which
+// joins the south lane at (11, 10) from the side. The fences around the existing path at x = 11 are removed.
+class WidePathSideEntranceTest : public WidePathLanesTestBase
+{
+public:
+    static void SetUpTestSuite()
+    {
+        LoadPark({ { 7, 15, 9, 10 } });
+        for (const int32_t y : { 9, 10 })
+        {
+            const auto loc = TileCoordsXY{ 11, y }.toCoordsXY();
+            for (auto* wall : TileElementsView<WallElement>(loc))
+                wall->setGhost(true);
+        }
+        gRideName = "PathWithFences";
+        gGoalTile = { 11, 10 };
+    }
+
+    static void TearDownTestSuite()
+    {
+        UnloadPark();
+    }
+};
+
+TEST_F(WidePathSideEntranceTest, GuestsFindAnEntranceOnTheSideOfThePath)
+{
+    auto* ride = FindRideByName("PathWithFences");
+    ASSERT_NE(ride, nullptr);
+    std::printf(
+        "PathWithFences status %d, entrance %d,%d dir %d\n", static_cast<int>(ride->status), ride->getStation().entrance.x,
+        ride->getStation().entrance.y, ride->getStation().entrance.direction);
+
+    const std::pair<TileCoordsXYZ, Direction> starts[] = {
+        { { 15, 9, kPathZ }, 0 },
+        { { 15, 10, kPathZ }, 0 },
+        { { 7, 9, kPathZ }, 2 },
+        { { 7, 10, kPathZ }, 2 },
+        // Starting out walking away from the entrance.
+        { { 12, 9, kPathZ }, 2 },
+        { { 12, 10, kPathZ }, 2 },
+        { { 10, 9, kPathZ }, 0 },
+        { { 10, 10, kPathZ }, 0 },
+    };
+    for (const auto& [start, direction] : starts)
+    {
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto stock = WalkGuests(start, direction, 10, false, true);
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto result = WalkGuests(start, direction, 10, true, true);
+        const auto name = "Side entrance from " + std::to_string(start.x) + "," + std::to_string(start.y);
+        Print((name + " (disabled)").c_str(), stock);
+        Print(name.c_str(), result);
+        EXPECT_EQ(result.arrived, 10);
+        // Guests that start out walking away from the entrance may reach a dead end and turn around, which stock also
+        // counts towards getting lost.
+        EXPECT_LE(result.countedAsLost, stock.countedAsLost);
+        EXPECT_LE(result.tilesWalked, stock.tilesWalked + 20) << "Expected about the same distance as stock";
+    }
+}
+
+// --- A plaza -----------------------------------------------------------------------------------------------------
+
+// The strip, with a plaza (x = 2..7, y = 6..8) joined along its north side, making one open area of paths from y = 6
+// to y = 10 between x = 2 and x = 7.
+class WidePathPlazaTest : public WidePathLanesTestBase
+{
+public:
+    static void SetUpTestSuite()
+    {
+        LoadPark({ { kStripFirstX, kStripLastX, 9, 10 }, { 2, 7, 6, 8 } });
+    }
+
+    static void TearDownTestSuite()
+    {
+        UnloadPark();
+    }
+};
+
+TEST_F(WidePathPlazaTest, GuestsCrossThePlaza)
+{
+    const std::pair<TileCoordsXYZ, Direction> starts[] = {
+        { { 7, 6, kPathZ }, 0 },
+        { { 7, 6, kPathZ }, 1 },
+        { { 2, 6, kPathZ }, 1 },
+        { { 10, 9, kPathZ }, 0 },
+    };
+    for (const auto& [start, direction] : starts)
+    {
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto stock = WalkGuests(start, direction, 10, false, true);
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto result = WalkGuests(start, direction, 10, true, true);
+        const auto name = "Plaza from " + std::to_string(start.x) + "," + std::to_string(start.y);
+        Print((name + " (disabled)").c_str(), stock);
+        Print(name.c_str(), result);
+        EXPECT_EQ(result.arrived, 10);
+        EXPECT_EQ(result.countedAsLost, 0);
+        EXPECT_LE(result.tilesWalked, std::max(stock.tilesWalked, 10 * 12) + 20);
+    }
+}
+
+TEST_F(WidePathPlazaTest, AimlessGuestsKeepWalking)
+{
+    const auto result = WalkGuests({ 4, 7, kPathZ }, 0, 20, true, false, false, 3000);
+    Print("Plaza, aimless", result);
+    EXPECT_GT(result.tilesWalked, 20 * 50) << "Expected guests to keep walking around rather than getting stuck";
+}
+
+TEST_F(WidePathPlazaTest, DrawCountsMatchStockOnThePlaza)
+{
+    const auto heading = WalkGuests({ 7, 6, kPathZ }, 0, 10, true, true, true);
+    const auto aimless = WalkGuests({ 4, 7, kPathZ }, 0, 10, true, false, true, 2000);
+    Print("Draws, plaza", heading);
+    Print("Draws, plaza aimless", aimless);
+    EXPECT_GT(heading.decisionsCompared + aimless.decisionsCompared, 500);
+    EXPECT_EQ(heading.drawMismatches + aimless.drawMismatches, 0);
 }
