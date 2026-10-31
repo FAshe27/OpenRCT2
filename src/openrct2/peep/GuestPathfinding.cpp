@@ -2981,8 +2981,16 @@ namespace OpenRCT2::PathFinding
         const int32_t target = GetPreferredLane(peep, heading, right, laneLeft, laneRight);
         if (target != 0)
         {
+            // Only drift into a lane that carries on past the tile the guest lands on. A lane that ends there (e.g. at a
+            // shop front) would leave them facing it: they look in, turn round, drift back towards their lane in front
+            // of the next shop, and so on (seen circling between two shops in Franklin's park).
             const Direction side = target > 0 ? right : DirectionReverse(right);
-            if (IsLaneBlock(tile, current, heading, side))
+            const auto landing = tile + TileDirectionDelta[heading] + TileDirectionDelta[side];
+            const auto* landingElement = GetLanePathAt(landing, loc.z);
+            const auto* beyond = GetLanePathAt(landing + TileDirectionDelta[heading], loc.z);
+            const bool laneCarriesOn = landingElement != nullptr && beyond != nullptr
+                && LanePathsConnected(*landingElement, *beyond, heading);
+            if (laneCarriesOn && IsLaneBlock(tile, current, heading, side))
             {
                 InTileOffsetScope inTileOffset(
                     GetLaneInTileOffset(peep, heading, right, laneLeft, laneRight, target > 0 ? 1 : -1));
