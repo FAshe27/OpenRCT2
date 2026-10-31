@@ -1903,8 +1903,9 @@ namespace OpenRCT2
 
             if (ride.getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
             {
-                // Workers: guests do not trek to a stall that is shut for lack of an operator.
-                if (RideStaffing::IsStallClosed(ride))
+                // Workers: guests do not trek to a stall that is shut for lack of an
+                // operator, or that has sold out.
+                if (RideStaffing::IsStallClosed(ride) || RideStaffing::IsStallSoldOut(ride))
                 {
                     choseNotToGoOnRide(ride, peepAtRide, true);
                     return false;
@@ -3401,6 +3402,7 @@ namespace OpenRCT2
                     if (item_bought)
                     {
                         ride->numSecondaryItemsSold = AddClamp(ride->numSecondaryItemsSold, 1u);
+                        RideStaffing::RecordStallSale(*ride);
                     }
                 }
 
@@ -3412,6 +3414,7 @@ namespace OpenRCT2
                     if (item_bought)
                     {
                         ride->numPrimaryItemsSold = AddClamp(ride->numPrimaryItemsSold, 1u);
+                        RideStaffing::RecordStallSale(*ride);
                     }
                 }
             }

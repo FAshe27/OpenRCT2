@@ -599,6 +599,13 @@ namespace OpenRCT2
             {
                 ft.Add<StringId>(STR_CLOSED_NO_OPERATOR);
             }
+            // Restock: a staffed stall with empty shelves is sold out. Checked
+            // after the operator rule: a stall that is both keeps the operator
+            // label, because without crew no restock run can even start.
+            else if (RideStaffing::IsStallSoldOut(*this))
+            {
+                ft.Add<StringId>(STR_CLOSED_SOLD_OUT);
+            }
             else
             {
                 ft.Add<StringId>(STR_OPEN);

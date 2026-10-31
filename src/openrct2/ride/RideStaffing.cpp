@@ -271,4 +271,83 @@ namespace OpenRCT2::RideStaffing
         }
         return best;
     }
+
+    bool IsStallSoldOut(const Ride& ride)
+    {
+        const auto& rtd = ride.getRideTypeDescriptor();
+        if (rtd.Classification != RideClassification::shopOrStall)
+            return false;
+        if (GetRequiredOperators(ride) <= 0)
+            return false;
+        if (ride.shopStock > 0)
+            return false;
+        return IsEngaged();
+    }
+
+    void RecordStallSale(Ride& ride)
+    {
+        if (ride.getRideTypeDescriptor().Classification != RideClassification::shopOrStall)
+            return;
+        if (ride.shopStock == 0)
+            return;
+        if (!IsEngaged())
+            return;
+        ride.shopStock--;
+    }
+
+    bool IsRestockInFlight(const Ride& ride)
+    {
+        for (auto* staff : EntityList<Staff>())
+        {
+            if (staff->isWorker() && staff->currentRide == ride.id && staff->restockPhase != 0)
+                return true;
+        }
+        return false;
+    }
+
+    bool IsStockroom(const Ride& ride)
+    {
+        return ride.type == RIDE_TYPE_STOCKROOM;
+    }
+
+    Ride* GetStockroomAtTile(const CoordsXY& loc)
+    {
+        auto* tileElement = MapGetFirstElementAt(loc);
+        if (tileElement == nullptr)
+            return nullptr;
+
+        do
+        {
+            if (tileElement->getType() == TileElementType::track)
+            {
+                auto* ride = GetRide(tileElement->asTrack()->getRideIndex());
+                if (ride != nullptr && IsStockroom(*ride))
+                    return ride;
+            }
+        } while (!(tileElement++)->isLastForTile());
+
+        return nullptr;
+    }
+
+    Ride* FindStockroomTripTarget(Staff& worker)
+    {
+        Ride* best = nullptr;
+        int64_t bestDistance = 0;
+        for (auto& ride : RideManager(getGameState()))
+        {
+            if (!IsStockroom(ride) || ride.status == RideStatus::closed)
+                continue;
+
+            const auto stationStart = ride.getStation().getStart();
+            const int64_t dx = stationStart.x - worker.x;
+            const int64_t dy = stationStart.y - worker.y;
+            const int64_t distance = dx * dx + dy * dy;
+            if (best == nullptr || distance < bestDistance)
+            {
+                best = &ride;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
 } // namespace OpenRCT2::RideStaffing

@@ -562,7 +562,9 @@ namespace OpenRCT2
             const bool deferredNamesThisRide = peep->hasDeferredAssignment && peep->deferredAssignment == id;
             const bool tripNamesThisRide = peep->breakTripRoom == id;
             const bool homeNamesThisRide = peep->breakRoom == id;
-            if (!assignmentNamesThisRide && !deferredNamesThisRide && !tripNamesThisRide && !homeNamesThisRide)
+            const bool restockTargetNamesThisRide = peep->restockTripTarget == id;
+            if (!assignmentNamesThisRide && !deferredNamesThisRide && !tripNamesThisRide && !homeNamesThisRide
+                && !restockTargetNamesThisRide)
                 continue;
 
             if (deferredNamesThisRide)
@@ -580,12 +582,27 @@ namespace OpenRCT2
                 // His break room is gone: the home falls back to Nearest.
                 peep->breakRoom = RideId::GetNull();
             }
+            if (restockTargetNamesThisRide || (assignmentNamesThisRide && peep->restockPhase != 0))
+            {
+                // A restock run dies with either of its rides: the stall
+                // it serves (an assignment match with a run in flight) or
+                // the stockroom it was fetching from (the target match).
+                // The outcome classes below decide where the worker ends
+                // up standing; the retry stamp keeps a surviving stall
+                // from re-dispatching him into the same hole next think.
+                if (peep->restockPhase != 0)
+                    peep->restockRetryTick = getGameState().currentTicks + RideStaffing::kRestockRetryTicks;
+                peep->restockPhase = 0;
+                peep->restockTripTarget = RideId::GetNull();
+                peep->restockPickupEndTick = 0;
+            }
             // A worker resting inside THIS ride (a break room being
             // demolished under him) must come out even if the field that
             // named the ride was only his break-room home.
             const auto* restingRoom = peep->state == PeepState::onBreak
                 ? RideStaffing::GetBreakRoomAtTile(CoordsXY{ peep->x, peep->y })
-                : nullptr;
+                : peep->state == PeepState::restocking ? RideStaffing::GetStockroomAtTile(CoordsXY{ peep->x, peep->y })
+                                                       : nullptr;
             const bool restingInThisRide = restingRoom != nullptr && restingRoom->id == id;
 
             if (assignmentNamesThisRide)
@@ -609,6 +626,14 @@ namespace OpenRCT2
                     // Resting inside a different ride's break room: he
                     // is somewhere safe, so clearing the assignment is
                     // enough - do not drag him out of the room.
+                    continue;
+                }
+
+                if (peep->state == PeepState::restocking && !restingInThisRide)
+                {
+                    // Loading inside a stockroom somewhere else: likewise
+                    // safe where he is - his own update steps him out when
+                    // he finds the assignment gone.
                     continue;
                 }
 

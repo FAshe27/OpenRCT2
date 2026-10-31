@@ -130,4 +130,63 @@ namespace OpenRCT2::RideStaffing
     // measured from the worker. nullptr when no room can take him.
     Ride* FindBreakRoomTripTarget(Staff& worker);
 
+    // Restock: stall stock and the runs that refill it. A stall's stock
+    // (Ride::shopStock) decrements per completed sale while staffing is
+    // engaged; at the trigger level the stall's second at-post worker -
+    // the runner - walks to fetch more, and the stall refills when he
+    // returns to post. The run machinery itself lives in Staff.cpp, like
+    // the break trips; the rules that other systems consult live here.
+
+    // True when the stall is staffed and open but has nothing to sell:
+    // staffing is engaged and the stock counter has reached zero. Guests
+    // refuse a sold-out stall at the same two points as a shut one
+    // (Guest::shouldGoOnRide and PeepInteractWithShop).
+    bool IsStallSoldOut(const Ride& ride);
+
+    // One completed stall sale, reported by Guest::updateBuying beside
+    // the items-sold increments so the two stay in lockstep: the stock
+    // counter decrements, floored at zero. An unengaged park never
+    // decrements - with no workers there is no runner, and a stock
+    // counter that drained with nobody able to refill it would deadlock
+    // every stall sold out; not draining is part of behaving exactly
+    // like stock until the player opts in.
+    void RecordStallSale(Ride& ride);
+
+    // How much stock a stall may fall to before it sends its runner.
+    constexpr int32_t kRestockTriggerLevel = 25;
+
+    // After a restock run is forgotten (source unreachable or demolished,
+    // assignment pulled, worker picked up), this long must pass before
+    // the worker may be dispatched again - the break-room grace cadence,
+    // reused so a stall with a broken source retries politely instead of
+    // re-dispatching every think.
+    constexpr uint32_t kRestockRetryTicks = 1000;
+
+    // True while any worker assigned to this ride is out on a restock run
+    // for it (any phase). Counted on demand by scanning the staff list,
+    // like CountWorkersOnBreak, so the answer can never drift from
+    // reality across pickups, firings and demolitions.
+    bool IsRestockInFlight(const Ride& ride);
+
+    // Stockrooms (Restock): a stockroom is a ride of the cloned type
+    // RIDE_TYPE_STOCKROOM - an unstaffed supply building whose only
+    // visitors are workers on restock runs (see rtd/shops/Stockroom.h).
+    // This classification is the one place stockroom logic keys off,
+    // exactly like break rooms above.
+    bool IsStockroom(const Ride& ride);
+
+    // The stockroom whose facility tile contains loc, or nullptr when the
+    // tile holds no stockroom. A loading runner's room is always derived
+    // this way from the tile under him, never stored on the worker.
+    Ride* GetStockroomAtTile(const CoordsXY& loc);
+
+    // Where a restock run should fetch from: the nearest open stockroom,
+    // measured from the worker (who at dispatch stands at his stall, so
+    // this is the stall's nearest too). nullptr when the park has no
+    // open stockroom - and then no run is dispatched at all: restock
+    // is reliant on stockrooms (Franklin's ruling, 2026-10-30), so the
+    // stall keeps its stock level until one is built and opens. No
+    // capacity limit: a stockroom takes every runner its stalls send.
+    Ride* FindStockroomTripTarget(Staff& worker);
+
 } // namespace OpenRCT2::RideStaffing

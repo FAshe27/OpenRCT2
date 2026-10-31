@@ -1500,6 +1500,23 @@ namespace OpenRCT2
     // cadence, so the effective grace is this plus up to 127 ticks.
     static constexpr uint32_t kBreakRoomGraceTicks = 1000;
 
+    // The subState a worker rides in while stepping from a stockroom's
+    // frontage tile onto the room tile itself (updateWorkerHeadingToPost).
+    static constexpr uint8_t kWorkerSubStateRestockStepIn = 7;
+
+    // How long a restock runner spends loading inside the stockroom
+    // before heading back: long enough to read as a pickup, short enough
+    // that the run's turnaround stays dominated by the walk - the walk
+    // is the placement cost the Stockroom exists to create.
+    static constexpr uint32_t kRestockPickupTicks = 200;
+
+    // Restock run phases (Staff::restockPhase; 0 is no run). The phase
+    // flag is the authority for whether a run exists at all - the trip
+    // target beside it is only read while outbound or loading.
+    static constexpr uint8_t kRestockPhaseOutbound = 1;
+    static constexpr uint8_t kRestockPhaseLoading = 2;
+    static constexpr uint8_t kRestockPhaseReturning = 3;
+
     void Staff::tick128UpdateWorker()
     {
         if (state == PeepState::picked)
@@ -1566,6 +1583,24 @@ namespace OpenRCT2
                 setState(PeepState::falling);
         }
 
+        // A restock run in its outbound or loading phase owns the worker
+        // the same way, and is forgotten the same way when it is
+        // interrupted (picked up and put down - he is no longer
+        // travelling or loading). The returning phase is deliberately
+        // not state-checked: a runner carrying stock keeps the delivery
+        // through diversions (the stall closing, a break, a pickup) and
+        // delivers when he next takes post - only an assignment change
+        // or a demolition ends it early, and both clear the fields at
+        // their own sites.
+        if (restockPhase == kRestockPhaseOutbound && state != PeepState::headingToInspection)
+        {
+            forgetRestockRun();
+        }
+        else if (restockPhase == kRestockPhaseLoading && state != PeepState::restocking)
+        {
+            forgetRestockRun();
+        }
+
         auto* ride = GetRide(currentRide);
         const bool validAssignment = ride != nullptr && RideStaffing::GetRequiredOperators(*ride) > 0;
 
@@ -1602,6 +1637,7 @@ namespace OpenRCT2
             return;
         }
 
+        tick128WorkerRestockCheck();
         tick128WorkerBreakRoomIdle();
     }
 
@@ -1666,6 +1702,130 @@ namespace OpenRCT2
         subState = 0;
         resetPathfindGoal();
         return true;
+    }
+
+    // The restock trigger (Restock), on the think cadence: a stall whose
+    // stock has fallen to the trigger level sends its runner - the second
+    // at-post worker - to fetch more, while its operator keeps selling.
+    // With nobody else at post there is no early run: the operator goes
+    // himself only once the stall is empty, when it is sold-out shut
+    // anyway. The crew scan takes the two smallest entity ids among the
+    // stall's at-post workers (first is the operator, second the runner),
+    // so the choice is deterministic and stable while the crew stands.
+    void Staff::tick128WorkerRestockCheck()
+    {
+        if (restockPhase != 0 || state != PeepState::operating)
+            return;
+
+        auto* stall = GetRide(currentRide);
+        if (stall == nullptr || stall->getRideTypeDescriptor().Classification != RideClassification::shopOrStall
+            || stall->status != RideStatus::open)
+        {
+            return;
+        }
+        if (!RideStaffing::IsEngaged())
+            return;
+        if (getGameState().currentTicks < restockRetryTick)
+            return;
+        if (RideStaffing::IsRestockInFlight(*stall))
+            return;
+
+        Staff* first = nullptr;
+        Staff* second = nullptr;
+        for (auto* other : EntityList<Staff>())
+        {
+            if (!other->isWorker() || other->currentRide != stall->id || other->state != PeepState::operating)
+                continue;
+            if (first == nullptr || other->id.ToUnderlying() < first->id.ToUnderlying())
+            {
+                second = first;
+                first = other;
+            }
+            else if (second == nullptr || other->id.ToUnderlying() < second->id.ToUnderlying())
+            {
+                second = other;
+            }
+        }
+
+        if (this == second && stall->shopStock <= RideStaffing::kRestockTriggerLevel)
+        {
+            workerBeginRestockRun();
+        }
+        else if (this == first && second == nullptr && stall->shopStock == 0)
+        {
+            workerBeginRestockRun();
+        }
+    }
+
+    bool Staff::workerBeginRestockRun()
+    {
+        // The source is resolved once, at dispatch: the nearest open
+        // stockroom. Restock is reliant on stockrooms (Franklin's
+        // ruling, 2026-10-30): with none open there is no run at all -
+        // the stall keeps its stock level, and the trigger looks again
+        // on its cadence once one is built and open. The departure
+        // shape is the break trip's.
+        auto* room = RideStaffing::FindStockroomTripTarget(*this);
+        if (room == nullptr)
+            return false;
+        restockTripTarget = room->id;
+        restockPhase = kRestockPhaseOutbound;
+        currentRideStation = StationIndex::FromUnderlying(0);
+        setState(PeepState::headingToInspection);
+        subState = 0;
+        resetPathfindGoal();
+        return true;
+    }
+
+    // Ends a restock run without a delivery: the fields clear and the
+    // worker's retry tick is stamped, so a stall whose source is
+    // unreachable or keeps vanishing retries on the grace cadence
+    // instead of re-dispatching every think. A completed delivery does
+    // not come through here - it clears the fields itself, unstamped.
+    void Staff::forgetRestockRun()
+    {
+        if (restockPhase != 0)
+            restockRetryTick = getGameState().currentTicks + RideStaffing::kRestockRetryTicks;
+        restockPhase = 0;
+        restockTripTarget = RideId::GetNull();
+        restockPickupEndTick = 0;
+    }
+
+    // Loading inside a stockroom: stand at the room tile's centre,
+    // undrawn (isHiddenAtPost). The state is short and self-contained,
+    // so validity - the phase live, the stall still his assignment, the
+    // room still under him - is re-checked here every tick, like post
+    // validity is re-checked on the think cadence for updateOperating;
+    // anything wrong forgets the errand and steps him back out.
+    void Staff::updateRestocking()
+    {
+        if (auto loc = updateAction(); loc.has_value())
+        {
+            moveTo({ loc.value(), z });
+        }
+        invalidate();
+
+        auto* stall = GetRide(currentRide);
+        const auto* room = RideStaffing::GetStockroomAtTile(CoordsXY{ x, y });
+        if (restockPhase != kRestockPhaseLoading || stall == nullptr
+            || stall->getRideTypeDescriptor().Classification != RideClassification::shopOrStall || room == nullptr)
+        {
+            forgetRestockRun();
+            if (room != nullptr)
+                workerLeaveStockroom();
+            else
+                workerStepOffToAdjacentPath();
+            return;
+        }
+
+        if (getGameState().currentTicks < restockPickupEndTick)
+            return;
+
+        // Loaded: carry the stock back. The delivery lands when he next
+        // takes post (the arrival block in updateWorkerHeadingToPost).
+        restockPhase = kRestockPhaseReturning;
+        workerLeaveStockroom();
+        workerBeginHeadingToPost();
     }
 
     bool Staff::workerBeginHeadingToPost()
@@ -2004,8 +2164,11 @@ namespace OpenRCT2
         // destination is the room in breakTripRoom, not the assignment in
         // currentRide, and the shop branch below serves both - a break
         // room is a shop-class facility whose post is its frontage tile.
+        // A restock run to a stockroom rides here the same way, with the
+        // source in restockTripTarget while the run is outbound.
         const bool toBreakRoom = !breakTripRoom.IsNull();
-        auto* ride = GetRide(toBreakRoom ? breakTripRoom : currentRide);
+        const bool toRestockSource = restockPhase == kRestockPhaseOutbound && !restockTripTarget.IsNull();
+        auto* ride = GetRide(toBreakRoom ? breakTripRoom : toRestockSource ? restockTripTarget : currentRide);
 
         // Egress rides in this state too (workerBeginEgress): the ride
         // being closed is the whole point of the walk out, so it is
@@ -2024,6 +2187,8 @@ namespace OpenRCT2
         {
             if (toBreakRoom)
                 breakTripRoom = RideId::GetNull();
+            if (toRestockSource)
+                forgetRestockRun();
             setState(PeepState::falling);
             return;
         }
@@ -2054,7 +2219,30 @@ namespace OpenRCT2
                 // Could not reach the post; resume patrolling, the next think retries.
                 if (toBreakRoom)
                     breakTripRoom = RideId::GetNull();
+                if (toRestockSource)
+                    forgetRestockRun();
                 setState(PeepState::falling);
+                return;
+            }
+
+            if (subState == kWorkerSubStateRestockStepIn)
+            {
+                // Stepping from the stockroom's frontage tile onto the
+                // room tile itself, like the break step-in below. The
+                // give-up timer above covers this subState too.
+                if (auto loc = updateAction(); loc.has_value())
+                {
+                    moveTo({ loc.value(), ride->getStation().getBaseZ() });
+                    return;
+                }
+
+                // On the stockroom tile: load up inside, undrawn. No
+                // capacity check - a stockroom takes every runner its
+                // stalls send (v1 has no stockroom capacity).
+                restockPhase = kRestockPhaseLoading;
+                restockPickupEndTick = getGameState().currentTicks + kRestockPickupTicks;
+                setState(PeepState::restocking);
+                subState = 0;
                 return;
             }
 
@@ -2111,6 +2299,17 @@ namespace OpenRCT2
             // never be true.)
             if (TileCoordsXY{ CoordsXY{ x, y } } == postTile.value())
             {
+                if (toRestockSource)
+                {
+                    // Arrived at the stockroom's frontage: step onto the
+                    // room tile itself and load inside, undrawn - the
+                    // break step-in's shape, one subState over.
+                    const auto roomTile = TileCoordsXY(ride->getStation().start);
+                    setDestination(roomTile.toCoordsXY() + CoordsXY{ 16, 16 }, 2);
+                    subState = kWorkerSubStateRestockStepIn;
+                    return;
+                }
+
                 if (toBreakRoom)
                 {
                     // Arrived at the room's frontage: step onto the room
@@ -2135,6 +2334,16 @@ namespace OpenRCT2
                 }
                 setState(PeepState::operating);
                 subState = 0;
+                if (restockPhase == kRestockPhaseReturning)
+                {
+                    // A restock runner back at post: the delivery lands.
+                    // A plain clear, not forgetRestockRun - a completed
+                    // run earns no retry cooldown.
+                    ride->shopStock = Ride::kShopStockCapacity;
+                    restockPhase = 0;
+                    restockTripTarget = RideId::GetNull();
+                    restockPickupEndTick = 0;
+                }
                 return;
             }
 
@@ -2259,6 +2468,11 @@ namespace OpenRCT2
         if (state == PeepState::onBreak)
             return true;
 
+        // Loading inside a stockroom: undrawn on the same principle -
+        // the state exists only inside the room.
+        if (state == PeepState::restocking)
+            return true;
+
         if (state != PeepState::operating || currentRide.IsNull())
             return false;
         const auto* ride = GetRide(currentRide);
@@ -2289,6 +2503,35 @@ namespace OpenRCT2
     void Staff::workerLeaveBreakRoom()
     {
         if (const auto* room = RideStaffing::GetBreakRoomAtTile(CoordsXY{ x, y }); room != nullptr)
+        {
+            if (const auto postTile = GetStallPostTile(*room); postTile.has_value())
+            {
+                for (auto* pathElement : TileElementsView<PathElement>(postTile->toCoordsXY()))
+                {
+                    if (pathElement->isGhost())
+                        continue;
+
+                    const auto dest = postTile->toCoordsXY() + CoordsXY{ 16, 16 };
+                    moveTo(CoordsXYZ{ dest, pathElement->getBaseZ() });
+                    setState(PeepState::patrolling);
+                    subState = 0;
+                    resetPathfindGoal();
+                    setDestination(dest, 2);
+                    return;
+                }
+            }
+        }
+
+        workerStepOffToAdjacentPath();
+    }
+
+    // The one way out of a stockroom: step back onto its frontage path
+    // tile (the tile GetStallPostTile computes for the facility) and
+    // resume patrolling there - workerLeaveBreakRoom's mirror, with the
+    // same adjacent-path fallback when no frontage can be found.
+    void Staff::workerLeaveStockroom()
+    {
+        if (const auto* room = RideStaffing::GetStockroomAtTile(CoordsXY{ x, y }); room != nullptr)
         {
             if (const auto postTile = GetStallPostTile(*room); postTile.has_value())
             {
@@ -2389,8 +2632,13 @@ namespace OpenRCT2
         // Worker is heading to their assigned ride or stall - or, on a
         // break trip, to their break room (the destination in
         // breakTripRoom, which the goal logic below treats exactly like a
-        // stall: a break room is a shop-class facility).
-        auto* ride = GetRide(!breakTripRoom.IsNull() ? breakTripRoom : currentRide);
+        // stall: a break room is a shop-class facility) - or, on a
+        // restock run, to their stockroom (restockTripTarget, while the
+        // run is outbound; the same treatment, for the same reason).
+        auto* ride = GetRide(
+            !breakTripRoom.IsNull()                                                    ? breakTripRoom
+                : restockPhase == kRestockPhaseOutbound && !restockTripTarget.IsNull() ? restockTripTarget
+                                                                                       : currentRide);
         if (ride != nullptr && state == PeepState::headingToInspection)
         {
             TileCoordsXYZ goalPos;
@@ -2463,6 +2711,21 @@ namespace OpenRCT2
         {
             breakTripRoom = RideId::GetNull();
             breakDepartureTick = 0;
+        }
+
+        // Restock runs: an assignment instruction cancels a run in
+        // flight, like a break trip - a loading runner emerges first -
+        // and the stock he was fetching is not delivered. This runs
+        // before any deferral below, so a switch that ends up deferred
+        // through an egress still cancels the run at instruction time.
+        if (state == PeepState::restocking)
+        {
+            workerLeaveStockroom();
+            forgetRestockRun();
+        }
+        else if (restockPhase != 0)
+        {
+            forgetRestockRun();
         }
 
         if (currentRide == rideId)
@@ -2961,6 +3224,9 @@ namespace OpenRCT2
                     break;
                 case PeepState::onBreak:
                     updateOnBreak();
+                    break;
+                case PeepState::restocking:
+                    updateRestocking();
                     break;
                 default:
                     // TODO reset to default state

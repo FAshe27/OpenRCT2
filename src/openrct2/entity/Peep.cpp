@@ -176,6 +176,7 @@ namespace OpenRCT2
             case PeepState::watering:
             case PeepState::headingToInspection:
             case PeepState::onBreak:
+            case PeepState::restocking:
                 return true;
         }
         return false;
@@ -1446,6 +1447,8 @@ namespace OpenRCT2
                 return { PeepActionDescriptionType::operatingRide, currentRide };
             case PeepState::onBreak:
                 return { PeepActionDescriptionType::onBreak };
+            case PeepState::restocking:
+                return { PeepActionDescriptionType::restocking };
             case PeepState::inspecting:
                 return { PeepActionDescriptionType::inspectingRide, currentRide };
         }
@@ -2255,8 +2258,9 @@ namespace OpenRCT2
             return true;
         }
 
-        // Workers: an unstaffed stall is shut - no sales until an operator is at post.
-        if (RideStaffing::IsStallClosed(*ride))
+        // Workers: an unstaffed stall is shut - no sales until an operator is at
+        // post - and a sold-out stall has nothing to sell even with one.
+        if (RideStaffing::IsStallClosed(*ride) || RideStaffing::IsStallSoldOut(*ride))
         {
             PeepReturnToCentreOfTile(guest);
             return true;

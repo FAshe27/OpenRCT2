@@ -461,14 +461,17 @@ namespace OpenRCT2
         uint8_t lastInspection{};
         uint8_t downtimeHistory[Limits::kDowntimeHistorySize]{};
         uint32_t numPrimaryItemsSold{};
-        // Stall/shop stock capacity (restock survey's recommended
-        // starting point: ~40 items - a busy stall sells out in a few
-        // game days, a quiet one effectively never).
-        static constexpr uint16_t kShopStockCapacity = 40;
-        // Stall/shop stock on hand (restock survey): a field only in this
-        // build - nothing decrements or reads it yet; it exists so the
-        // bundled ParkFile 65 format carries it from the start. Defaults
-        // to full (kShopStockCapacity) at creation and on pre-65 saves.
+        // Stall/shop stock capacity (Restock): 100 items - a busy stall
+        // sells out in a few game days, a quiet one effectively never.
+        // The level that triggers a restock run lives in RideStaffing.
+        static constexpr uint16_t kShopStockCapacity = 100;
+        // Stall/shop stock on hand (Restock): decremented once per
+        // completed stall sale while staffing is engaged
+        // (RideStaffing::RecordStallSale) and refilled to capacity by a
+        // worker's restock run when he returns to post. Defaults to full
+        // (kShopStockCapacity) at creation and on pre-65 saves; stalls
+        // saved before the restock build carry their stored level (the
+        // old full 40) until their first refill.
         uint16_t shopStock = kShopStockCapacity;
         uint32_t numSecondaryItemsSold{};
         // Used to oscillate the sound when ride breaks down.
@@ -810,6 +813,10 @@ namespace OpenRCT2
         // into saves and must never move. The break room is a shop-class
         // facility cloned from the toilets (see rtd/shops/BreakRoom.h).
         RIDE_TYPE_BREAK_ROOM,
+        // Restock: the stockroom, a second shop-class facility clone -
+        // the supply building stall workers fetch stock from
+        // (see rtd/shops/Stockroom.h).
+        RIDE_TYPE_STOCKROOM,
 
         RIDE_TYPE_COUNT
     };

@@ -1800,6 +1800,8 @@ enum : StringId
     STR_CLOSED_NO_OPERATOR = 7083,
     STR_OPENING_WAITING_FOR_STAFF = 7098,
     STR_ON_BREAK = 7104,
+    STR_CLOSED_SOLD_OUT = 7110,
+    STR_RESTOCKING = 7111,
 
     // Have to include resource strings (from scenarios and objects) for the time being now that language is partially working
     /* MAX_STR_COUNT = 32768 */ // MAX_STR_COUNT - upper limit for number of strings, not the current count strings

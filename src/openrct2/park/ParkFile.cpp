@@ -1863,8 +1863,10 @@ namespace OpenRCT2
                     cs.readWrite(ride.musicTuneId);
                     cs.readWrite(ride.musicPosition);
 
-                    // Stall/shop stock (bundled ParkFile 65 fields): a
-                    // field only in this build - nothing reads it yet.
+                    // Stall/shop stock (bundled ParkFile 65 field): a
+                    // plain counter in the format - the restock system
+                    // (a decrement per sale, refills by restock run) is
+                    // what reads and writes it in play.
                     if (version >= kBreakRoomsVersion)
                     {
                         cs.readWrite(ride.shopStock);

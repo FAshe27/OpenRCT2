@@ -174,6 +174,7 @@ namespace OpenRCT2::Ui::Windows
         RIDE_TYPE_CASH_MACHINE,
         RIDE_TYPE_TOILETS,
         RIDE_TYPE_BREAK_ROOM,
+        RIDE_TYPE_STOCKROOM,
     };
 
 #pragma endregion

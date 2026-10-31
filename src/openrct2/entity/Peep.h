@@ -69,8 +69,9 @@ namespace OpenRCT2
         watering = 21,
         headingToInspection = 22,
         inspecting = 23,
-        operating = 24, // Workers only: standing at their assigned ride/stall, on duty
-        onBreak = 25,   // Workers only: resting inside a break room, undrawn
+        operating = 24,  // Workers only: standing at their assigned ride/stall, on duty
+        onBreak = 25,    // Workers only: resting inside a break room, undrawn
+        restocking = 26, // Workers only: loading stock inside a stockroom, undrawn
     };
 
     enum class PeepSittingSubState : uint8_t
@@ -332,6 +333,7 @@ namespace OpenRCT2
         respondingToBreakdownCall,
         operatingRide,
         onBreak,
+        restocking,
 
         count,
     };

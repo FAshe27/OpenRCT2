@@ -1762,6 +1762,17 @@ namespace OpenRCT2::Ui::Windows
             return rtd.flags.has(RtdFlag::isShopOrFacility) || rtd.specialType == RtdSpecialType::miniGolf;
         }
 
+        // The stock row for selling stalls (Restock), stacked under the
+        // Operators row on the main page: exactly the rides whose stock
+        // counter exists. Every shopOrStall ride also shows the Operators
+        // row (required 1, and the shop types carry isShopOrFacility), so
+        // the stock row's resize, geometry shift and drawing all live
+        // inside that row's block and can never disagree with it.
+        bool MainShowsStockRow(const Ride& ride) const
+        {
+            return ride.getRideTypeDescriptor().Classification == RideClassification::shopOrStall;
+        }
+
         void MainResize()
         {
             int32_t newMinHeight = 180;
@@ -1790,6 +1801,12 @@ namespace OpenRCT2::Ui::Windows
             {
                 // Room for the Operators row under the status strip.
                 newMinHeight += 26;
+
+                if (MainShowsStockRow(*ride))
+                {
+                    // A second band at the same pitch for the stock row.
+                    newMinHeight += 26;
+                }
             }
 
             flags |= WindowFlag::resizable;
@@ -2486,9 +2503,12 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_MAIN_ASSIGN_OPERATOR].setHidden(!showOperatorsRow);
             if (showOperatorsRow)
             {
-                widgets[WIDX_VIEWPORT].bottom = height - 31;
-                widgets[WIDX_STATUS].top = height - 29;
-                widgets[WIDX_STATUS].bottom = height - 19;
+                // A stock row (stalls) stacks a second band at the same
+                // 26px pitch above the Operators band.
+                const int32_t stockRowShift = MainShowsStockRow(*ride) ? 26 : 0;
+                widgets[WIDX_VIEWPORT].bottom = height - 31 - stockRowShift;
+                widgets[WIDX_STATUS].top = height - 29 - stockRowShift;
+                widgets[WIDX_STATUS].bottom = height - 19 - stockRowShift;
 
                 // Same enable rule as the maintenance page's button.
                 const auto staffing = RideStaffing::GetStaffing(*ride);
@@ -2754,6 +2774,16 @@ namespace OpenRCT2::Ui::Windows
                     operatorsFt.Add<int32_t>(staffing.assigned - staffing.atPost);
                 }
                 drawText(rt, windowPos + ScreenCoordsXY{ 4, height - 15 }, operatorsString, operatorsFt);
+
+                if (MainShowsStockRow(*ride))
+                {
+                    auto stockFt = Formatter();
+                    stockFt.Add<int32_t>(ride->shopStock);
+                    stockFt.Add<int32_t>(Ride::kShopStockCapacity);
+                    const auto stockString = RideStaffing::IsRestockInFlight(*ride) ? STR_RIDE_STOCK_RESTOCKING
+                                                                                    : STR_RIDE_STOCK;
+                    drawText(rt, windowPos + ScreenCoordsXY{ 4, height - 41 }, stockString, stockFt);
+                }
 
                 widget = &widgets[WIDX_MAIN_ASSIGN_OPERATOR];
                 if (widget->isVisible())

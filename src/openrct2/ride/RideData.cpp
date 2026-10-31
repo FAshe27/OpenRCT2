@@ -94,6 +94,7 @@
 #include "rtd/shops/FoodStall.h"
 #include "rtd/shops/InformationKiosk.h"
 #include "rtd/shops/Shop.h"
+#include "rtd/shops/Stockroom.h"
 #include "rtd/shops/Toilets.h"
 #include "rtd/thrill/3DCinema.h"
 #include "rtd/thrill/Enterprise.h"
@@ -359,6 +360,7 @@ namespace OpenRCT2
         /* RIDE_TYPE_LSM_LAUNCHED_ROLLER_COASTER        */ kLSMLaunchedRollerCoasterRTD,
         /* RIDE_TYPE_CLASSIC_WOODEN_TWISTER_ROLLER_COASTER */ kClassicWoodenTwisterRollerCoasterRTD,
         /* RIDE_TYPE_BREAK_ROOM                         */ kBreakRoomRTD,
+        /* RIDE_TYPE_STOCKROOM                          */ kStockroomRTD,
     };
 
     bool RideTypeDescriptor::SupportsTrackGroup(const TrackGroup trackGroup) const

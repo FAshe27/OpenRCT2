@@ -83,6 +83,35 @@ namespace OpenRCT2
         // already added), or 0 while he is not counting. Runtime-only.
         uint32_t breakDepartureTick = 0;
 
+        // Workers: an in-flight restock run (Restock). The run's home
+        // stall is the assignment in currentRide, which survives the run
+        // like it survives a break; restockTripTarget is the stockroom
+        // being fetched from - set at dispatch, and a run is only ever
+        // dispatched when an open stockroom exists (restock is reliant
+        // on stockrooms), so it is never null while a phase is live.
+        // restockPhase
+        // is the authority - 0 no run, 1 travelling to the source, 2
+        // loading inside the stockroom, 3 returning with the stock - and
+        // the target is only ever read while the phase is 1 or 2, so a
+        // fresh entity's zero-filled target is inert (contrast breakRoom
+        // above, whose bare read is why the hire funnel initialises it).
+        // All runtime-only, deliberately absent from serialise() and
+        // from ParkFile: a save made mid-run loads with no run in
+        // flight, the worker heads back to post, and the trigger fires
+        // again if the stall is still low.
+        RideId restockTripTarget;
+        uint8_t restockPhase = 0;
+
+        // Workers: the tick at which a loading runner's pickup completes
+        // and he heads back to his stall. Runtime-only, like the run.
+        uint32_t restockPickupEndTick = 0;
+
+        // Workers: a restock run may not be dispatched by this worker
+        // before this tick - stamped when a run is forgotten, so a stall
+        // whose source is unreachable retries on a grace cadence instead
+        // of every think. Runtime-only; 0 means no cooldown.
+        uint32_t restockRetryTick = 0;
+
         union // 1st statistic
         {
             uint32_t staffLawnsMown;
@@ -182,6 +211,13 @@ namespace OpenRCT2
         void tick128WorkerBreakRoomIdle();
         bool workerBeginBreakTrip(RideId roomId);
         void updateOnBreak();
+
+        // Workers (restock runs)
+        void tick128WorkerRestockCheck();
+        bool workerBeginRestockRun();
+        void forgetRestockRun();
+        void updateRestocking();
+        void workerLeaveStockroom();
 
         bool doHandymanPathFinding();
         bool doMechanicPathFinding();

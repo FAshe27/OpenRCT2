@@ -228,6 +228,16 @@ namespace OpenRCT2::GameActions
                 // from a deliberate assignment to ride 0.
                 newPeep->currentRide = RideId::GetNull();
                 newPeep->currentRideStation = StationIndex::GetNull();
+                // The same trap in the break-room home (Restock): it too
+                // zero-fills to ride 0, and the staff window printed that
+                // ride's name as the hire's home room until his first
+                // break trip scrubbed the value (the round-5 census above
+                // missed the field). The restock target rides along: it
+                // is only ever read under a non-zero restock phase, so
+                // its zero-fill is inert, but the funnel is where this
+                // class of bug dies, so it dies here too.
+                newPeep->breakRoom = RideId::GetNull();
+                newPeep->restockTripTarget = RideId::GetNull();
             }
 
             res.setData(StaffHireNewActionResult{ newPeep->id });

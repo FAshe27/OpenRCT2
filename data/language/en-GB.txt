@@ -3897,3 +3897,9 @@ STR_7103    :No break rooms
 STR_7104    :On a break
 STR_7105    :Break Room
 STR_7106    :A break room where park workers can rest between duties
+STR_7107    :Stockroom
+STR_7108    :A stockroom where stall supplies are kept for restock runs
+STR_7109    :Stock: {INT32} / {INT32}
+STR_7110    :Closed (sold out)
+STR_7111    :Restocking
+STR_7112    :Stock: {INT32} / {INT32} (restocking)
