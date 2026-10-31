@@ -2267,7 +2267,8 @@ namespace OpenRCT2::PathFinding
         {
             LogPathfinding(&peep, "Completed CalculateNextDestination - taking only direction available: %d.", direction);
 
-            _capturedForced = true;
+            if (_captureMoveDirection)
+                _capturedForced = true;
             return PeepMoveOneTile(direction, peep);
         }
 
@@ -2935,13 +2936,22 @@ namespace OpenRCT2::PathFinding
                 closestStationNum = stationIndex;
             }
         }
-        if (numEntranceStations == 0)
-            return std::nullopt;
         if (numEntranceStations > 1 && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS))
             closestStationNum = GuestPathfindingSelectRandomStation(peep, numEntranceStations, entranceStations);
 
-        const TileCoordsXYZD entrance = ride->getStation(closestStationNum).entrance;
-        TileCoordsXYZ goal{ entrance.x, entrance.y, entrance.z };
+        TileCoordsXYZ goal;
+        if (numEntranceStations == 0)
+        {
+            // Ride has no stations with an entrance, so head to station 0's start (closestStationNum is 0 here).
+            const auto& closestStation = ride->getStation(closestStationNum);
+            const auto start = TileCoordsXY(closestStation.start);
+            goal = { start.x, start.y, closestStation.height };
+        }
+        else
+        {
+            const TileCoordsXYZD entrance = ride->getStation(closestStationNum).entrance;
+            goal = { entrance.x, entrance.y, entrance.z };
+        }
         GetRideQueueEnd(goal);
         return goal;
     }

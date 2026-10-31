@@ -378,6 +378,8 @@ TEST_F(WidePathLanesTest, DrawCountsMatchStockForAimlessGuestsAndSidePaths)
     // Aimless guests in the north lane pass the side path at x = 4, so this covers the outer-side check too.
     const auto result = WalkGuests({ 8, 9, kPathZ }, 0, 20, true, false, true, 3000);
     Print("Draws, aimless and side path", result);
+    // Measured: 3,494 decisions before the field-direct step (ce917080), 2,997 after it (ba5ec463), with 0 mismatches
+    // both times. Field-directed guests take fewer, longer steps, so fewer decisions fit in the same walk.
     EXPECT_GT(result.decisionsCompared, 2500);
     EXPECT_EQ(result.drawMismatches, 0);
 }
@@ -566,7 +568,8 @@ TEST_F(WidePathSideEntranceTest, GuestsFindAnEntranceOnTheSideOfThePath)
         Print(name.c_str(), result);
         EXPECT_EQ(result.arrived, 10);
         // Guests that start out walking away from the entrance may reach a dead end and turn around, which stock also
-        // counts towards getting lost.
+        // counts towards getting lost, so this only requires no worse than stock. Measured at ba5ec463: 0 counted as lost
+        // from every start with the lanes on (stock: up to 10 of 10).
         EXPECT_LE(result.countedAsLost, stock.countedAsLost);
         EXPECT_LE(result.tilesWalked, stock.tilesWalked + 20) << "Expected about the same distance as stock";
     }
