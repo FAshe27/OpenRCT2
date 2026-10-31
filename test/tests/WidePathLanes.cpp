@@ -681,3 +681,66 @@ TEST_F(WidePathNarrowExitTest, DrawCountsMatchStockAtTheNarrowPath)
     EXPECT_GT(result.decisionsCompared, 100);
     EXPECT_EQ(result.drawMismatches, 0);
 }
+
+TEST_F(WidePathLanesTest, GuestsUseTheWholeWidthOfThePath)
+{
+    // Where guests walking along the two lanes aim across the path (y, in 32nds of a tile from the north edge of row 9),
+    // for heading and aimless guests. The middle of the path - the line between the two lanes - should be used too,
+    // not just the two outer halves.
+    auto* ride = FindRideByName("PathWithGap");
+    ASSERT_NE(ride, nullptr);
+    std::vector<int32_t> positions;
+    for (const bool heading : { true, false })
+    {
+        std::vector<Guest*> guests;
+        for (int32_t i = 0; i < 40; i++)
+        {
+            const TileCoordsXYZ start{ kStripLastX, 9 + (i % 2), kPathZ };
+            guests.push_back(Guest::generate(start.toCoordsXYZ().toTileCentre()));
+        }
+        for (auto* guest : guests)
+        {
+            const TileCoordsXYZ start{ TileCoordsXYZ{ guest->getLocation() } };
+            guest->outsideOfPark = false;
+            guest->state = PeepState::walking;
+            guest->guestHeadingToRideId = heading ? ride->id : RideId::GetNull();
+            guest->peepDirection = 0;
+            guest->nextLoc = start.toCoordsXYZ();
+            guest->setNextFlags(0, false, false);
+            guest->setDestination(CoordsXY{ guest->getLocation() } + CoordsDirectionDelta[0], 2);
+            CoordsXY lastDestination = guest->getDestination();
+            for (int32_t step = 0; step < 1500; step++)
+            {
+                guest->performNextAction();
+                const auto destination = guest->getDestination();
+                if (destination != lastDestination)
+                {
+                    lastDestination = destination;
+                    const TileCoordsXY tile{ destination };
+                    if (tile.x > kStripFirstX + 1 && tile.x < kStripLastX - 1 && (tile.y == 9 || tile.y == 10))
+                        positions.push_back(destination.y - 9 * kCoordsXYStep);
+                }
+                if (heading && TileCoordsXY{ TileCoordsXYZ{ guest->nextLoc } } == kGoalTile)
+                    break;
+            }
+        }
+        for (auto* guest : guests)
+            PeepEntityRemove(guest);
+    }
+
+    ASSERT_GT(positions.size(), 200u);
+    int32_t middle = 0;
+    int32_t bands[4]{};
+    for (const auto position : positions)
+    {
+        middle += (position >= 24 && position < 40) ? 1 : 0;
+        bands[std::clamp(position / 16, 0, 3)]++;
+    }
+    std::printf(
+        "Across the path: %zu positions, quarters %d/%d/%d/%d, middle band %d\n", positions.size(), bands[0], bands[1],
+        bands[2], bands[3], middle);
+    const auto total = static_cast<int32_t>(positions.size());
+    EXPECT_GT(middle * 100, total * 15) << "Expected guests in the middle of the path too";
+    for (const auto band : bands)
+        EXPECT_GT(band * 100, total * 10) << "Expected guests across the whole width";
+}

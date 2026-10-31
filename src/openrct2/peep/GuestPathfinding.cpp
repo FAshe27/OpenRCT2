@@ -347,6 +347,9 @@ namespace OpenRCT2::PathFinding
     // Wide path lanes (personal fork): when set, PeepMoveOneTile only records the direction instead of moving the
     // peep, so the lane code can ask which way the regular pathfinding would go from a tile (see "Wide path lanes").
     static bool _captureMoveDirection = false;
+    // Set by the lane code around a move on a wide path: the guest's position within the tile they move to, across their
+    // walking direction (positive towards the same side as GuestSpreadSignedLane), replacing the per-guest lane.
+    static std::optional<int32_t> _wideLaneInTileOverride;
     static Direction _capturedMoveDirection = kInvalidDirection;
     // Set while CalculateNextDestinationDefault runs in capture mode and reaches a dead end; the dead-end checks
     // are left to the lane code, which knows whether the guest really is at a dead end.
@@ -443,6 +446,10 @@ namespace OpenRCT2::PathFinding
             const bool laneKeepsRight = static_cast<int32_t>(sideMix % 100) < kGuestSpreadKeepRightPercent;
             const int32_t laneRight = laneKeepsRight ? laneMagnitude : -laneMagnitude;
             int32_t lane = (direction == 2 || direction == 3) ? laneRight : -laneRight;
+            // Wide path lanes (personal fork): on wide paths the lane code places the guest across the whole path, and
+            // passes the resulting position within this tile here (see GetLanePosition).
+            if (_wideLaneInTileOverride.has_value())
+                lane = *_wideLaneInTileOverride;
 
             if (lane > kGuestSpreadFurnitureLaneMax || lane < -kGuestSpreadFurnitureLaneMax)
             {
@@ -2461,9 +2468,10 @@ namespace OpenRCT2::PathFinding
      *    default code's decision. They never get a move that leads away from the destination.
      *  - Aimless guests go where the default code's own random choice takes them; walking straight on, they drift
      *    diagonally towards their lane (see the end of CalculateNextDestinationInLanes).
-     *  - Each guest's lane comes from GuestSpreadSignedLane - the same per-guest lane PeepMoveOneTile walks them at
-     *    within a tile - scored across the path's width by the same centre-distance rule as the field's corridor
-     *    scoring (CorridorCandidateScores). The path's width is measured on the rows just behind and ahead too
+     *  - Each guest's GuestSpreadSignedLane - the per-guest lane PeepMoveOneTile walks them at within a tile - is turned
+     *    into one position across the whole path (GetLanePosition), split into a tile lane and a position within the
+     *    tile; PeepMoveOneTile and PeepMoveDiagonally place the guest there (_wideLaneInTileOverride). The path's
+     *    width is measured on the rows just behind and ahead too
      *    (GetCorridorLaneRange), so a crossing path doesn't count as width. Lane changes are diagonal moves across a
      *    fully connected flat 2x2 block (IsLaneBlock).
      *
@@ -2638,34 +2646,75 @@ namespace OpenRCT2::PathFinding
         return range;
     }
 
+    // How far guests stand from the centre of a tile, across their walking direction, on the side towards another lane
+    // of the same path (on the path's outer edges, and on single-width paths, the per-guest lane's +/-8 applies as
+    // before). Large enough to reach close to the line between two lanes, so the middle of a wide path is used too;
+    // small enough to stay inside the tile. Franklin's call to tune.
+    static constexpr int32_t kWideLaneInnerMax = 14;
+
     /**
-     * The lane (offset from the main lane, towards right) the guest wants to walk in, out of the lanes from laneLeft to
-     * laneRight. Uses the same rule as CorridorCandidateScores in GuestFieldRouting.cpp: the guest's GuestSpreadSignedLane
-     * picks the point width * (16 + lane) across the path (in 32nds of a tile, from the side GuestSpreadSignedLane calls
-     * negative), and the column whose centre (32 * column + 16) is closest to it wins. So the tile lane and the position
-     * within it are the same preference at two scales. On an exact tie (the point on a column boundary), the field's
-     * scoring falls back to its per-guest hash order over step directions, which has no counterpart here; the column on
-     * the negative side wins instead.
+     * Where the guest walks across a path whose lanes run from laneLeft to laneRight (offsets towards right): one
+     * position across the whole width, from the guest's GuestSpreadSignedLane, spread evenly from 8 units inside one
+     * outer edge to 8 units inside the other (so the outer edges keep the per-guest lane's +/-8 limit). Splitting that
+     * single position into a tile lane and a position within the tile counts the guest's lane once: using the lane for
+     * both (an earlier version) put every guest near an outer edge and left the middle of the path empty. On a
+     * single-width path this is exactly the per-guest lane.
      */
-    static int32_t GetPreferredLane(const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight)
+    struct LanePosition
     {
+        int32_t lane;   // Offset of the guest's tile lane, towards right.
+        int32_t across; // Position across the path from its edge on GuestSpreadSignedLane's negative side, in 32nds.
+    };
+
+    static LanePosition GetLanePosition(
+        const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight)
+    {
+        constexpr int32_t kEdgeMargin = 16 - 8;
         const int32_t width = laneRight - laneLeft + 1;
         const int32_t lane = GuestSpreadSignedLane(peep.peepId, forward);
-        const int32_t target = width * (16 + lane);
-        int32_t column = 0;
-        int32_t bestDistance = std::numeric_limits<int32_t>::max();
-        for (int32_t i = 0; i < width; i++)
-        {
-            const int32_t distance = std::abs(32 * i + 16 - target);
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                column = i;
-            }
-        }
+        const int32_t across = kEdgeMargin + (32 * width - 2 * kEdgeMargin) * (lane + 8) / 16;
+        const int32_t column = std::clamp(across / 32, 0, width - 1);
         const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
-        return right == plusSide ? laneLeft + column : laneRight - column;
+        return { right == plusSide ? laneLeft + column : laneRight - column, across };
     }
+
+    static int32_t GetPreferredLane(const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight)
+    {
+        return GetLanePosition(peep, forward, right, laneLeft, laneRight).lane;
+    }
+
+    /**
+     * The guest's position within the tile at landingLane (an offset towards right, between laneLeft and laneRight), as
+     * a signed offset from its centre towards GuestSpreadSignedLane's positive side: their position across the path,
+     * limited to the tile (kWideLaneInnerMax). In a tile other than their own lane, they keep to its side nearest
+     * their lane.
+     */
+    static int32_t GetLaneInTileOffset(
+        const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight, int32_t landingLane)
+    {
+        const auto position = GetLanePosition(peep, forward, right, laneLeft, laneRight);
+        const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
+        const int32_t column = right == plusSide ? landingLane - laneLeft : laneRight - landingLane;
+        return std::clamp(position.across - (32 * column + 16), -kWideLaneInnerMax, kWideLaneInnerMax);
+    }
+
+    // Sets the position within the tile for the move made during its lifetime (see _wideLaneInTileOverride).
+    class InTileOffsetScope
+    {
+    public:
+        explicit InTileOffsetScope(int32_t offset)
+        {
+            _wideLaneInTileOverride = offset;
+        }
+
+        ~InTileOffsetScope()
+        {
+            _wideLaneInTileOverride.reset();
+        }
+
+        InTileOffsetScope(const InTileOffsetScope&) = delete;
+        InTileOffsetScope& operator=(const InTileOffsetScope&) = delete;
+    };
 
     /**
      * Same as PeepMoveOneTile, but moves the peep to the tile diagonally ahead (one tile forward and one tile to the
@@ -2680,7 +2729,8 @@ namespace OpenRCT2::PathFinding
         peep.peepDirection = forward;
 
         const int8_t offset = (ScenarioRand() & 7) - 3;
-        int32_t lane = GuestSpreadSignedLane(peep.peepId, forward);
+        int32_t lane = _wideLaneInTileOverride.has_value() ? *_wideLaneInTileOverride
+                                                           : GuestSpreadSignedLane(peep.peepId, forward);
         if (lane > kWideLaneFurnitureLaneMax || lane < -kWideLaneFurnitureLaneMax)
         {
             const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
@@ -2808,6 +2858,7 @@ namespace OpenRCT2::PathFinding
         Direction bestForward = kInvalidDirection;
         std::optional<Direction> bestSide;
         int32_t bestLanePenalty = 0;
+        int32_t bestInTileOffset = 0;
         uint32_t bestDistance = 0;
 
         for (const Direction forward : kAllDirections)
@@ -2859,6 +2910,7 @@ namespace OpenRCT2::PathFinding
                     bestForward = forward;
                     bestSide = side;
                     bestLanePenalty = lanePenalty;
+                    bestInTileOffset = GetLaneInTileOffset(peep, forward, right, laneLeft, laneRight, sideOffset);
                     bestDistance = distance;
                 }
             }
@@ -2876,6 +2928,7 @@ namespace OpenRCT2::PathFinding
             result = PeepMoveOneTile(fieldDirection, peep);
             return FieldLaneStep::moved;
         }
+        InTileOffsetScope inTileOffset(bestInTileOffset);
         result = bestSide.has_value() ? PeepMoveDiagonally(bestForward, *bestSide, peep) : PeepMoveOneTile(bestForward, peep);
         return FieldLaneStep::moved;
     }
@@ -2941,8 +2994,13 @@ namespace OpenRCT2::PathFinding
         {
             const Direction side = target > 0 ? right : DirectionReverse(right);
             if (IsLaneBlock(tile, current, heading, side))
+            {
+                InTileOffsetScope inTileOffset(
+                    GetLaneInTileOffset(peep, heading, right, laneLeft, laneRight, target > 0 ? 1 : -1));
                 return PeepMoveDiagonally(heading, side, peep);
+            }
         }
+        InTileOffsetScope inTileOffset(GetLaneInTileOffset(peep, heading, right, laneLeft, laneRight, 0));
         return PeepMoveOneTile(heading, peep);
     }
 
