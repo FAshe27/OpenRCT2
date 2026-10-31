@@ -2976,9 +2976,12 @@ namespace OpenRCT2::PathFinding
         const auto goal = GetGuestGoal(peep);
         if (!goal.has_value())
             return FieldLaneStep::noField;
+        // A destination without a field here (not built yet, or the guest is off its graph): the default code decides.
+        // The lane code below follows decisions that, around wide paths, can flip back and forth between tiles; with a
+        // destination that can trap the guest (seen in Franklin's park). Aimless guests choose randomly, so they can't.
         uint32_t distanceHere = 0;
         if (!GuestFieldDistance(*goal, loc, distanceHere))
-            return FieldLaneStep::noField;
+            return FieldLaneStep::handOver;
         if (distanceHere == 0)
             return FieldLaneStep::handOver;
 

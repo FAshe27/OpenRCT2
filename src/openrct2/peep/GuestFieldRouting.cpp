@@ -271,6 +271,12 @@ namespace OpenRCT2::PathFinding
                         if (entranceType == EntranceType::parkEntrance || entranceType == EntranceType::rideEntrance)
                         {
                             CollectStepSources(goal, false, tileElement->getDirection(), sources);
+                            // Wide path lanes (personal fork): a park entrance is walked through both ways. Its
+                            // direction is the way guests walk in, so guests leaving the park arrive from the other
+                            // side; without this, the field was rooted outside the park only, and no node inside the
+                            // park was reached.
+                            if (entranceType == EntranceType::parkEntrance)
+                                CollectStepSources(goal, false, DirectionReverse(tileElement->getDirection()), sources);
                             return true;
                         }
                     }
