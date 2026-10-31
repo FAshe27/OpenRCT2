@@ -11,6 +11,7 @@
 
 #include "../Diagnostic.h"
 #include "../GameState.h"
+#include "../config/Config.h"
 #include "../core/Guard.hpp"
 #include "../entity/Guest.h"
 #include "../entity/Staff.h"
@@ -342,6 +343,17 @@ namespace OpenRCT2::PathFinding
         return (direction == 2 || direction == 3) ? laneRight : -laneRight;
     }
 
+    // Wide path lanes (personal fork): when set, PeepMoveOneTile only records the direction instead of moving the
+    // peep, so the lane code can ask which way the regular pathfinding would go from a tile (see "Wide path lanes").
+    static bool _captureMoveDirection = false;
+    static Direction _capturedMoveDirection = kInvalidDirection;
+    // Set while CalculateNextDestinationDefault runs in capture mode and reaches a dead end; the dead-end checks
+    // are left to the lane code, which knows whether the guest really is at a dead end.
+    static bool _capturedDeadEnd = false;
+    // Set while the lane code asks about a tile the guest is NOT standing on: side effects that only make sense for
+    // the guest's real tile (reading their map) are skipped.
+    static bool _hypotheticalQuery = false;
+
     /**
      *
      *  rct2: 0x0069524E
@@ -349,6 +361,11 @@ namespace OpenRCT2::PathFinding
     static int32_t PeepMoveOneTile(Direction direction, Peep& peep)
     {
         assert(DirectionValid(direction));
+        if (_captureMoveDirection)
+        {
+            _capturedMoveDirection = direction;
+            return 0;
+        }
         auto newTile = CoordsXY{ CoordsXY{ peep.nextLoc } + CoordsDirectionDelta[direction] }.toTileCentre();
 
         if (newTile.x >= kMaximumMapSizeBig || newTile.y >= kMaximumMapSizeBig)
@@ -2170,7 +2187,7 @@ namespace OpenRCT2::PathFinding
      *
      *  rct2: 0x00694C35
      */
-    int32_t CalculateNextDestination(Guest& peep)
+    static int32_t CalculateNextDestinationDefault(Guest& peep)
     {
         LogPathfinding(&peep, "Starting CalculateNextDestination");
 
@@ -2222,9 +2239,16 @@ namespace OpenRCT2::PathFinding
         if (!(edges & ~(1 << direction)))
         {
             // In a dead end.  Check if peep is lost, etc.
-            peep.checkIfLost();
-            peep.checkCantFindRide();
-            peep.checkCantFindExit();
+            if (_captureMoveDirection)
+            {
+                _capturedDeadEnd = true;
+            }
+            else
+            {
+                peep.checkIfLost();
+                peep.checkCantFindRide();
+                peep.checkCantFindExit();
+            }
         }
         else
         {
@@ -2308,7 +2332,8 @@ namespace OpenRCT2::PathFinding
                 }
                 if ((ScenarioRand() & 0xFFFF) < probability)
                 {
-                    peep.readMap();
+                    if (!_hypotheticalQuery)
+                        peep.readMap();
                 }
             }
         }
@@ -2415,5 +2440,551 @@ namespace OpenRCT2::PathFinding
 
         return PeepMoveOneTile(direction, peep);
     }
+
+#pragma region Wide path lanes
+    /*
+     * Wide path lanes (personal fork, ported from FAshe27/openrct2-claude fix-lost-guests @ 3756da2c9).
+     *
+     * Where paths sit side by side, FootpathUpdatePathWideFlags sets the wide flag on some of their tiles, and the
+     * guest pathfinding avoids wide tiles: CalculateNextDestinationDefault strips edges into them for goal-directed
+     * guests, and the heuristic search stops at them. On a 2-wide path that leaves a single lane carrying everyone,
+     * and on a straight stretch it usually leaves one edge, so ChooseDirection - and with it the distance fields and
+     * their corridor scoring - is never consulted.
+     *
+     * The lane code keeps every routing decision with the existing pathfinding (fields included) and only changes
+     * which tile across the path the guest walks on:
+     *  - The "main lane" is the nearest non-wide tile across the path. The existing pathfinding is asked which way it
+     *    would go from there, by running CalculateNextDestinationDefault in capture mode (PeepMoveOneTile records the
+     *    direction instead of moving).
+     *  - Each guest's lane column comes from GuestSpreadSignedLane - the same per-guest lane PeepMoveOneTile walks them
+     *    at within a tile, and that the field's corridor scoring uses - drawn across the path's width. They move to it
+     *    one lane per tile, diagonally across a fully connected flat 2x2 block (IsLaneBlock).
+     *  - The path's width is measured on the rows just behind and ahead too (GetCorridorLaneRange), so a crossing path
+     *    doesn't count as width. At corners, guests on the inside of the turn turn a tile early (one-tile look-ahead)
+     *    and guests on the outside carry on to their own corner.
+     *
+     * Determinism (Franklin's invariant: ScenarioRand draws per decision identical to stock):
+     *  - The guest's own tile is always evaluated first, in capture mode, WITHOUT restoring anything: this consumes
+     *    exactly the draws stock CalculateNextDestination makes before its final PeepMoveOneTile.
+     *  - Every other evaluation (other candidate tiles, the corner look-ahead) is hypothetical: it runs inside a
+     *    HypotheticalQuery, which restores the ScenarioRand state and the guest's pathfinding state afterwards and
+     *    skips map reading.
+     *  - Every decision ends in exactly one move, PeepMoveOneTile or PeepMoveDiagonally, each drawing once - the same
+     *    as stock's final PeepMoveOneTile. Fallbacks follow the own-tile result instead of running the default code
+     *    again.
+     *  - Lane choice and the in-tile offset come from peepId hashes; the aimless "wander off the side" check hashes the
+     *    guest with the tile and side. No draws.
+     * Dead-end checks (checkIfLost etc.) are not run during capture; they run when the guest's own tile is a dead end
+     * and the guest follows the own-tile result, exactly as in stock.
+     *
+     * Setting: guests_use_wide_path_lanes in config.ini ([general]), default true. Off = stock behaviour exactly.
+     */
+
+    // The widest path (in tiles, either side of the main lane) that guests spread out across.
+    static constexpr int32_t kMaxLaneOffset = 6;
+
+    // Must match the lane block in PeepMoveOneTile.
+    static constexpr int32_t kWideLaneFurnitureLaneMax = 5;
+
+    // Saves everything a hypothetical CalculateNextDestinationDefault call could change, and restores it.
+    class HypotheticalQuery
+    {
+    public:
+        explicit HypotheticalQuery(Guest& guest)
+            : _guest(guest)
+            , _rand(ScenarioRandState())
+            , _pathfindGoal(guest.pathfindGoal)
+            , _pathfindHistory(guest.pathfindHistory)
+            , _peepFlags(guest.peepFlags)
+            , _wasHypothetical(_hypotheticalQuery)
+        {
+            _hypotheticalQuery = true;
+        }
+
+        ~HypotheticalQuery()
+        {
+            ScenarioRandSeed(_rand.s0, _rand.s1);
+            _guest.pathfindGoal = _pathfindGoal;
+            _guest.pathfindHistory = _pathfindHistory;
+            _guest.peepFlags = _peepFlags;
+            _hypotheticalQuery = _wasHypothetical;
+        }
+
+        HypotheticalQuery(const HypotheticalQuery&) = delete;
+        HypotheticalQuery& operator=(const HypotheticalQuery&) = delete;
+
+    private:
+        Guest& _guest;
+        random_engine_t::state_type _rand;
+        TileCoordsXYZD _pathfindGoal;
+        std::array<TileCoordsXYZD, 4> _pathfindHistory;
+        PeepFlags _peepFlags;
+        bool _wasHypothetical;
+    };
+
+    struct CapturedDecision
+    {
+        Direction direction = kInvalidDirection;
+        bool deadEnd = false;
+    };
+
+    // Returns the direction CalculateNextDestinationDefault chooses with the guest at loc, without moving them.
+    static std::optional<CapturedDecision> CaptureDecisionAt(Guest& peep, const TileCoordsXYZ& loc)
+    {
+        const auto savedNextLoc = peep.nextLoc;
+        peep.nextLoc = loc.toCoordsXYZ();
+        _captureMoveDirection = true;
+        _capturedMoveDirection = kInvalidDirection;
+        _capturedDeadEnd = false;
+
+        const auto result = CalculateNextDestinationDefault(peep);
+
+        _captureMoveDirection = false;
+        peep.nextLoc = savedNextLoc;
+
+        if (result != 0 || _capturedMoveDirection == kInvalidDirection)
+            return std::nullopt;
+        return CapturedDecision{ _capturedMoveDirection, _capturedDeadEnd };
+    }
+
+    // Asks which way the pathfinding would go from a tile the guest is not standing on, without side effects.
+    static std::optional<Direction> HypotheticalDirectionFrom(Guest& peep, const TileCoordsXYZ& loc)
+    {
+        HypotheticalQuery query(peep);
+        const auto decision = CaptureDecisionAt(peep, loc);
+        if (!decision.has_value())
+            return std::nullopt;
+        return decision->direction;
+    }
+
+    // Returns the flat, non-queue path element at the given tile and height, if guests can walk onto it.
+    static PathElement* GetLanePathAt(const TileCoordsXY& loc, int32_t baseHeight)
+    {
+        const auto coords = loc.toCoordsXY();
+        if (!MapIsLocationValid(coords))
+            return nullptr;
+
+        auto* pathElement = MapGetPathElementAt(TileCoordsXYZ{ loc, baseHeight });
+        if (pathElement == nullptr || pathElement->isSloped() || pathElement->isQueue())
+            return nullptr;
+        if (!MapIsLocationOwned({ coords, pathElement->getBaseZ() }))
+            return nullptr;
+
+        return pathElement;
+    }
+
+    static bool LanePathsConnected(const PathElement& from, const PathElement& to, Direction direction)
+    {
+        return (PathGetPermittedEdges(false, &from) & (1 << direction))
+            && (PathGetPermittedEdges(false, &to) & (1 << DirectionReverse(direction)));
+    }
+
+    /**
+     * Checks that loc, the tile ahead of it, the tile beside it and the tile diagonally ahead of it are all flat paths
+     * at the same height that are connected on all four sides, so a guest can walk diagonally across the block.
+     */
+    static bool IsLaneBlock(const TileCoordsXY& loc, const PathElement& current, Direction forward, Direction side)
+    {
+        const auto z = current.baseHeight;
+        const auto* ahead = GetLanePathAt(loc + TileDirectionDelta[forward], z);
+        const auto* beside = GetLanePathAt(loc + TileDirectionDelta[side], z);
+        const auto* diagonal = GetLanePathAt(loc + TileDirectionDelta[forward] + TileDirectionDelta[side], z);
+        if (ahead == nullptr || beside == nullptr || diagonal == nullptr)
+            return false;
+
+        return LanePathsConnected(current, *ahead, forward) && LanePathsConnected(current, *beside, side)
+            && LanePathsConnected(*ahead, *diagonal, side) && LanePathsConnected(*beside, *diagonal, forward);
+    }
+
+    static TileCoordsXY OffsetTile(const TileCoordsXY& loc, Direction direction, int32_t amount)
+    {
+        return { loc.x + TileDirectionDelta[direction].x * amount, loc.y + TileDirectionDelta[direction].y * amount };
+    }
+
+    /**
+     * Returns how far the path extends either side of loc (in tiles towards right, and towards the left as a negative
+     * number), following lane paths that are connected to each other.
+     */
+    static std::pair<int32_t, int32_t> GetLaneRange(const TileCoordsXY& loc, int32_t baseHeight, Direction right)
+    {
+        std::pair<int32_t, int32_t> range{ 0, 0 };
+        const auto* origin = GetLanePathAt(loc, baseHeight);
+        if (origin == nullptr)
+            return range;
+
+        for (const int32_t sign : { 1, -1 })
+        {
+            const Direction direction = sign > 0 ? right : DirectionReverse(right);
+            const auto* previous = origin;
+            for (int32_t i = 1; i <= kMaxLaneOffset; i++)
+            {
+                const auto* next = GetLanePathAt(OffsetTile(loc, direction, i), baseHeight);
+                if (next == nullptr || !LanePathsConnected(*previous, *next, direction))
+                    break;
+                (sign > 0 ? range.second : range.first) = sign * i;
+                previous = next;
+            }
+        }
+        return range;
+    }
+
+    /**
+     * Like GetLaneRange, but only counts lanes that also exist on the rows just behind and ahead of loc (where those rows
+     * are paths). Where another path crosses, the crossing path makes a row look much wider than the path the guest is
+     * walking along, so those extra tiles are left out.
+     */
+    static std::pair<int32_t, int32_t> GetCorridorLaneRange(
+        const TileCoordsXY& loc, int32_t baseHeight, Direction forward, Direction right)
+    {
+        auto range = GetLaneRange(loc, baseHeight, right);
+        for (const int32_t rowOffset : { -2, -1, 1, 2 })
+        {
+            const auto row = OffsetTile(loc, forward, rowOffset);
+            if (GetLanePathAt(row, baseHeight) == nullptr)
+                continue;
+            const auto rowRange = GetLaneRange(row, baseHeight, right);
+            range.first = std::max(range.first, rowRange.first);
+            range.second = std::min(range.second, rowRange.second);
+        }
+        return range;
+    }
+
+    /**
+     * The lane (offset from the main lane, towards right) the guest wants to walk in, out of the lanes from laneLeft to
+     * laneRight. Uses the guest's GuestSpreadSignedLane, drawn across the path's width the same way the field's corridor
+     * scoring does, so the tile lane and the position within it are the same preference at two scales.
+     */
+    static int32_t GetPreferredLane(const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight)
+    {
+        const int32_t width = laneRight - laneLeft + 1;
+        const int32_t lane = GuestSpreadSignedLane(peep.peepId, forward);
+        // Column counted from the side GuestSpreadSignedLane calls negative.
+        const int32_t column = std::clamp(width * (16 + lane) / 32, 0, width - 1);
+        const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
+        return right == plusSide ? laneLeft + column : laneRight - column;
+    }
+
+    /**
+     * Same as PeepMoveOneTile, but moves the peep to the tile diagonally ahead (one tile forward and one tile to the
+     * side). Only valid when IsLaneBlock() is true for those directions. Draws once, like PeepMoveOneTile, and places
+     * the guest at their usual lane within the tile (GuestSpreadSignedLane, pulled in next to path additions).
+     */
+    static int32_t PeepMoveDiagonally(Direction forward, Direction side, Peep& peep)
+    {
+        auto newTile = CoordsXY{ CoordsXY{ peep.nextLoc } + CoordsDirectionDelta[forward] + CoordsDirectionDelta[side] }
+                           .toTileCentre();
+
+        peep.peepDirection = forward;
+
+        const int8_t offset = (ScenarioRand() & 7) - 3;
+        int32_t lane = GuestSpreadSignedLane(peep.peepId, forward);
+        if (lane > kWideLaneFurnitureLaneMax || lane < -kWideLaneFurnitureLaneMax)
+        {
+            const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
+            const Direction laneSide = (lane > 0) ? plusSide : DirectionReverse(plusSide);
+            if (GuestSpreadPathAdditionOnEdge(newTile, peep, forward, laneSide))
+                lane = std::clamp(lane, -kWideLaneFurnitureLaneMax, kWideLaneFurnitureLaneMax);
+        }
+        if (forward == 0 || forward == 2)
+        {
+            newTile.x += offset;
+            newTile.y += lane;
+        }
+        else
+        {
+            newTile.x += lane;
+            newTile.y += offset;
+        }
+        peep.setDestination(newTile, 2);
+
+        return 0;
+    }
+
+    /**
+     * Returns true if whatever is on the outer side of a wide lane tile is something the guest is looking for, which
+     * the regular pathfinding cannot see from the main lane.
+     */
+    static bool IsGuestInterestedInLaneSide(Guest& peep, const TileCoordsXYZ& loc, PathElement& current, Direction outward)
+    {
+        RideId rideIndex = RideId::GetNull();
+        const auto result = FootpathElementDestinationInDirection(loc, &current, outward, &rideIndex);
+
+        if (peep.peepFlags.has(PeepFlag::leavingPark))
+            return result == PathSearchResult::parkExit;
+
+        if (!peep.guestHeadingToRideId.IsNull())
+        {
+            if ((result == PathSearchResult::rideEntrance || result == PathSearchResult::shopEntrance)
+                && rideIndex == peep.guestHeadingToRideId)
+                return true;
+
+            // The queue of the ride the guest is heading for.
+            const auto nextLoc = TileCoordsXY{ loc } + TileDirectionDelta[outward];
+            for (auto* pathElement : TileElementsView<PathElement>(nextLoc.toCoordsXY()))
+            {
+                if (!pathElement->isGhost() && pathElement->isQueue()
+                    && FootpathIsZAndDirectionValid(*pathElement, loc.z, outward)
+                    && pathElement->getRideIndex() == peep.guestHeadingToRideId)
+                    return true;
+            }
+            return false;
+        }
+
+        // Guests walking around aimlessly sometimes wander off the side, like they would from the main lane: 1 time in 4
+        // per guest, tile and side. Hashed rather than drawn, to keep ScenarioRand draws identical to stock.
+        switch (result)
+        {
+            case PathSearchResult::deadEnd:
+            case PathSearchResult::rideExit:
+            case PathSearchResult::wide:
+            case PathSearchResult::failed:
+                return false;
+            default:
+            {
+                uint32_t hash = peep.peepId * 2654435761u;
+                hash ^= static_cast<uint32_t>(loc.x) * 2246822519u;
+                hash ^= static_cast<uint32_t>(loc.y) * 3266489917u;
+                hash ^= (static_cast<uint32_t>(outward) + 1u) * 668265263u;
+                hash ^= hash >> 15;
+                hash *= 2246822519u;
+                hash ^= hash >> 13;
+                return (hash & 3) == 0;
+            }
+        }
+    }
+
+    // Runs the checks that the regular pathfinding does when a guest reaches a dead end.
+    static void CheckGuestAtDeadEnd(Guest& peep)
+    {
+        peep.checkIfLost();
+        peep.checkCantFindRide();
+        peep.checkCantFindExit();
+    }
+
+    struct MainLane
+    {
+        TileCoordsXYZ loc;
+        Direction direction;
+    };
+
+    /**
+     * Chooses the non-wide tile across the path from loc to take routing decisions from, and the direction the regular
+     * pathfinding chooses there. Guests on a non-wide tile use their own tile (own), unless the pathfinding just turns
+     * them around there (e.g. at the end of an outer lane of a path that is three tiles wide), or sends them sideways
+     * across the path. Returns nothing if no tile qualifies; the guest then follows their own tile's decision.
+     */
+    static std::optional<MainLane> FindMainLane(
+        Guest& peep, const TileCoordsXYZ& loc, const PathElement& current, const CapturedDecision& own)
+    {
+        const Direction heading = peep.peepDirection;
+        const Direction right = (heading + 1) & 3;
+        const auto tile = TileCoordsXY{ loc };
+        const auto [left, rightmost] = GetCorridorLaneRange(tile, loc.z, heading, right);
+
+        // Non-wide tiles across the path, nearest first.
+        std::array<TileCoordsXYZ, 2 * kMaxLaneOffset + 2> candidates;
+        size_t numCandidates = 0;
+        if (!current.isWide())
+            candidates[numCandidates++] = loc;
+        for (int32_t distance = 1; distance <= kMaxLaneOffset; distance++)
+        {
+            for (const int32_t offset : { distance, -distance })
+            {
+                if (offset < left || offset > rightmost)
+                    continue;
+                const auto candidate = OffsetTile(tile, right, offset);
+                const auto* pathElement = GetLanePathAt(candidate, loc.z);
+                if (pathElement != nullptr && !pathElement->isWide())
+                    candidates[numCandidates++] = { candidate, loc.z };
+            }
+
+            // Guests that just turned onto the end of a path may have the main lane straight ahead of them.
+            if (distance == 1 && current.isWide())
+            {
+                const auto candidate = tile + TileDirectionDelta[heading];
+                const auto* pathElement = GetLanePathAt(candidate, loc.z);
+                if (pathElement != nullptr && !pathElement->isWide() && LanePathsConnected(current, *pathElement, heading))
+                    candidates[numCandidates++] = { candidate, loc.z };
+            }
+        }
+
+        for (size_t i = 0; i < numCandidates; i++)
+        {
+            const auto& candidate = candidates[i];
+            const auto direction = candidate == loc ? std::optional<Direction>(own.direction)
+                                                    : HypotheticalDirectionFrom(peep, candidate);
+            if (!direction.has_value())
+                continue;
+
+            // Turning around, or moving sideways onto another tile of the same path: try the next lane.
+            if (*direction == DirectionReverse(heading))
+                continue;
+            if (*direction != heading)
+            {
+                const auto* candidateElement = GetLanePathAt(TileCoordsXY{ candidate }, loc.z);
+                const auto* sideElement = GetLanePathAt(TileCoordsXY{ candidate } + TileDirectionDelta[*direction], loc.z);
+                if (candidateElement != nullptr && sideElement != nullptr
+                    && LanePathsConnected(*candidateElement, *sideElement, *direction)
+                    && (PathGetPermittedEdges(false, sideElement) & (1 << heading)))
+                    continue;
+            }
+            return MainLane{ candidate, *direction };
+        }
+        return std::nullopt;
+    }
+
+    static int32_t CalculateNextDestinationInLanes(Guest& peep, const TileCoordsXYZ& loc, PathElement& current)
+    {
+        const auto tile = TileCoordsXY{ loc };
+
+        // The decision for the guest's own tile, using exactly the draws stock would.
+        const auto own = CaptureDecisionAt(peep, loc);
+        if (!own.has_value())
+            return 1;
+        const auto followOwnDecision = [&]() {
+            if (own->deadEnd)
+                CheckGuestAtDeadEnd(peep);
+            return PeepMoveOneTile(own->direction, peep);
+        };
+
+        const auto mainLane = FindMainLane(peep, loc, current, *own);
+        if (!mainLane.has_value())
+            return followOwnDecision();
+
+        const auto mainTile = TileCoordsXY{ mainLane->loc };
+        const Direction forward = mainLane->direction;
+        const Direction right = (forward + 1) & 3;
+        if (mainLane->loc == loc && forward == own->direction && own->deadEnd)
+            return followOwnDecision();
+
+        // Where the guest is across the path, relative to the main lane.
+        const auto toGuest = TileCoordsXY{ tile.x - mainTile.x, tile.y - mainTile.y };
+        const int32_t across = toGuest.x * TileDirectionDelta[right].x + toGuest.y * TileDirectionDelta[right].y;
+        const int32_t along = toGuest.x * TileDirectionDelta[forward].x + toGuest.y * TileDirectionDelta[forward].y;
+        if (along != 0)
+        {
+            // The main lane is turning (or crossing the path) towards the guest's side: the guest is on the inside of
+            // the turn, so turn here.
+            if (along > 0)
+            {
+                const auto* ahead = GetLanePathAt(tile + TileDirectionDelta[forward], loc.z);
+                if (ahead != nullptr && LanePathsConnected(current, *ahead, forward))
+                    return PeepMoveOneTile(forward, peep);
+                return followOwnDecision();
+            }
+
+            // The main lane is turning away from the guest's side. At a corner (where the main lane can't carry on
+            // straight), the guest is on the outside of the turn and carries on to their own corner. Otherwise (a
+            // junction or crossing, or a narrow side path) they cross over the main lane.
+            const Direction heading = peep.peepDirection;
+            const auto* mainElement = GetLanePathAt(mainTile, loc.z);
+            const bool mainLaneIsCorner = mainElement != nullptr
+                && !(PathGetPermittedEdges(false, mainElement) & (1 << heading));
+            if (mainLaneIsCorner && heading != forward && heading != DirectionReverse(forward)
+                && IsLaneBlock(tile, current, heading, forward))
+                return PeepMoveOneTile(heading, peep);
+            return PeepMoveOneTile(forward, peep);
+        }
+
+        const Direction towardsMain = across > 0 ? DirectionReverse(right) : right;
+        const Direction outward = DirectionReverse(towardsMain);
+        const auto [laneLeft, laneRight] = GetCorridorLaneRange(mainTile, loc.z, forward, right);
+        const int32_t outwardOffset = across + (across > 0 ? 1 : -1);
+        const bool outwardIsLane = outwardOffset >= laneLeft && outwardOffset <= laneRight;
+        if (across != 0)
+        {
+            // Things on the outer side of the path (shops, queues, side paths) can't be seen from the main lane.
+            if (!outwardIsLane && (PathGetPermittedEdges(false, &current) & (1 << outward))
+                && IsGuestInterestedInLaneSide(peep, loc, current, outward))
+            {
+                if (peep.guestHeadingToRideId.IsNull() && !peep.peepFlags.has(PeepFlag::leavingPark))
+                    return PeepMoveOneTile(outward, peep);
+                return followOwnDecision();
+            }
+        }
+
+        // The main lane doesn't continue as a flat path (e.g. a ride entrance or a slope), so join it.
+        const auto mainAheadTile = mainTile + TileDirectionDelta[forward];
+        const auto* mainElement = GetLanePathAt(mainTile, loc.z);
+        const auto* mainAhead = GetLanePathAt(mainAheadTile, loc.z);
+        if (mainElement == nullptr || mainAhead == nullptr || !LanePathsConnected(*mainElement, *mainAhead, forward))
+        {
+            if (across == 0)
+                return PeepMoveOneTile(forward, peep);
+            if (IsLaneBlock(tile, current, forward, towardsMain))
+                return PeepMoveDiagonally(forward, towardsMain, peep);
+            return PeepMoveOneTile(towardsMain, peep);
+        }
+
+        // Look one tile ahead for a corner: when the guest is on the inside of a turn the main lane is about to make,
+        // the guest's own lane turns here, a tile before the main lane does.
+        if (across != 0)
+        {
+            const auto* outer = GetLanePathAt(tile + TileDirectionDelta[outward], loc.z);
+            if (!outwardIsLane && outer != nullptr && LanePathsConnected(current, *outer, outward))
+            {
+                const auto nextDirection = HypotheticalDirectionFrom(peep, { mainAheadTile, loc.z });
+                if (nextDirection.has_value() && *nextDirection == outward)
+                    return PeepMoveOneTile(outward, peep);
+            }
+        }
+
+        const int32_t target = GetPreferredLane(peep, forward, right, laneLeft, laneRight);
+
+        // Move at most one lane across per tile.
+        const int32_t next = across + std::clamp(target - across, -1, 1);
+        if (next == across)
+        {
+            const auto* ahead = GetLanePathAt(tile + TileDirectionDelta[forward], loc.z);
+            if (ahead != nullptr && LanePathsConnected(current, *ahead, forward))
+                return PeepMoveOneTile(forward, peep);
+        }
+        else
+        {
+            const Direction side = next > across ? right : DirectionReverse(right);
+            if (IsLaneBlock(tile, current, forward, side))
+                return PeepMoveDiagonally(forward, side, peep);
+        }
+
+        // Can't move towards the preferred lane from here, so head back towards the main lane.
+        if (across == 0)
+            return PeepMoveOneTile(forward, peep);
+        if (IsLaneBlock(tile, current, forward, towardsMain))
+            return PeepMoveDiagonally(forward, towardsMain, peep);
+        return PeepMoveOneTile(towardsMain, peep);
+    }
+
+    // True if the guest's tile is part of a path more than one tile wide across their heading.
+    static bool IsOnWidePath(const Peep& peep, const TileCoordsXYZ& loc, const PathElement& current)
+    {
+        if (current.isWide())
+            return true;
+        const auto tile = TileCoordsXY{ loc };
+        for (const Direction side :
+             { static_cast<Direction>((peep.peepDirection + 1) & 3), static_cast<Direction>((peep.peepDirection + 3) & 3) })
+        {
+            const auto* beside = GetLanePathAt(tile + TileDirectionDelta[side], loc.z);
+            if (beside != nullptr && LanePathsConnected(current, *beside, side))
+                return true;
+        }
+        return false;
+    }
+
+    int32_t CalculateNextDestination(Guest& peep)
+    {
+        if (!Config::Get().general.guestsUseWidePathLanes || peep.outsideOfPark || peep.state != PeepState::walking
+            || peep.getNextIsSurface())
+        {
+            return CalculateNextDestinationDefault(peep);
+        }
+
+        const TileCoordsXYZ loc{ peep.nextLoc };
+        auto* current = GetLanePathAt(loc, loc.z);
+        if (current == nullptr || !IsOnWidePath(peep, loc, *current))
+            return CalculateNextDestinationDefault(peep);
+
+        return CalculateNextDestinationInLanes(peep, loc, *current);
+    }
+#pragma endregion
 
 } // namespace OpenRCT2::PathFinding
