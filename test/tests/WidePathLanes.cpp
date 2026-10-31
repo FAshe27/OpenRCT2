@@ -351,7 +351,7 @@ TEST_F(WidePathLanesTest, DrawCountsMatchStockAlongTheCorridor)
 {
     const auto result = WalkGuests({ kStripLastX, 10, kPathZ }, 0, 20, true, true, true);
     Print("Draws, corridor", result);
-    EXPECT_GT(result.decisionsCompared, 100);
+    EXPECT_GT(result.decisionsCompared, 150);
     EXPECT_EQ(result.drawMismatches, 0);
 }
 
@@ -360,7 +360,7 @@ TEST_F(WidePathLanesTest, DrawCountsMatchStockForAimlessGuestsAndSidePaths)
     // Aimless guests in the north lane pass the side path at x = 4, so this covers the outer-side check too.
     const auto result = WalkGuests({ 8, 9, kPathZ }, 0, 20, true, false, true, 3000);
     Print("Draws, aimless and side path", result);
-    EXPECT_GT(result.decisionsCompared, 100);
+    EXPECT_GT(result.decisionsCompared, 3000);
     EXPECT_EQ(result.drawMismatches, 0);
 }
 
@@ -395,7 +395,7 @@ TEST_F(WidePathThreeLanesTest, DrawCountsMatchStockAtDeadEnds)
     // Guests starting in the north lane, whose west end is a dead end.
     const auto result = WalkGuests({ 7, 8, kPathZ }, 0, 20, true, true, true);
     Print("Draws, three lanes and dead ends", result);
-    EXPECT_GT(result.decisionsCompared, 50);
+    EXPECT_GT(result.decisionsCompared, 100);
     EXPECT_EQ(result.drawMismatches, 0);
 }
 
@@ -443,7 +443,7 @@ TEST_F(WidePathCrossingTest, DrawCountsMatchStockThroughTheCrossing)
     {
         const auto result = WalkGuests(start, direction, 10, true, true, true);
         Print("Draws, crossing", result);
-        EXPECT_GT(result.decisionsCompared, 30);
+        EXPECT_GT(result.decisionsCompared, 60);
         EXPECT_EQ(result.drawMismatches, 0);
     }
 }
@@ -487,7 +487,7 @@ TEST_F(WidePathCornerTest, DrawCountsMatchStockRoundCorners)
     {
         const auto result = WalkGuests({ startX, 6, kPathZ }, 1, 20, true, true, true);
         Print("Draws, corner", result);
-        EXPECT_GT(result.decisionsCompared, 100);
+        EXPECT_GT(result.decisionsCompared, 200);
         EXPECT_EQ(result.drawMismatches, 0);
     }
 }

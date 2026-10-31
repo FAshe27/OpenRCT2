@@ -32,6 +32,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <limits>
 
 namespace OpenRCT2::PathFinding
 {
@@ -2447,9 +2448,10 @@ namespace OpenRCT2::PathFinding
      *
      * Where paths sit side by side, FootpathUpdatePathWideFlags sets the wide flag on some of their tiles, and the
      * guest pathfinding avoids wide tiles: CalculateNextDestinationDefault strips edges into them for goal-directed
-     * guests, and the heuristic search stops at them. On a 2-wide path that leaves a single lane carrying everyone,
-     * and on a straight stretch it usually leaves one edge, so ChooseDirection - and with it the distance fields and
-     * their corridor scoring - is never consulted.
+     * guests, and the heuristic search stops at them. On a 2-wide path that leaves a single lane carrying everyone. On
+     * a straight stretch, the wide-edge strip plus the removal of the edge the guest came in by usually leaves one edge,
+     * and the single-edge short-circuit then moves the guest without calling ChooseDirection - so the distance fields
+     * and their corridor scoring are never consulted there.
      *
      * The lane code keeps every routing decision with the existing pathfinding (fields included) and only changes
      * which tile across the path the guest walks on:
@@ -2457,7 +2459,8 @@ namespace OpenRCT2::PathFinding
      *    would go from there, by running CalculateNextDestinationDefault in capture mode (PeepMoveOneTile records the
      *    direction instead of moving).
      *  - Each guest's lane column comes from GuestSpreadSignedLane - the same per-guest lane PeepMoveOneTile walks them
-     *    at within a tile, and that the field's corridor scoring uses - drawn across the path's width. They move to it
+     *    at within a tile - scored across the path's width by the same centre-distance rule as the field's corridor
+     *    scoring (CorridorCandidateScores). They move to it
      *    one lane per tile, diagonally across a fully connected flat 2x2 block (IsLaneBlock).
      *  - The path's width is measured on the rows just behind and ahead too (GetCorridorLaneRange), so a crossing path
      *    doesn't count as width. At corners, guests on the inside of the turn turn a tile early (one-tile look-ahead)
@@ -2528,20 +2531,48 @@ namespace OpenRCT2::PathFinding
         bool deadEnd = false;
     };
 
+    // Puts PeepMoveOneTile into capture mode and the guest at another tile for its lifetime, restoring all of it (and
+    // any capture already in progress) afterwards, the same way HypotheticalQuery does for the generator.
+    class CaptureScope
+    {
+    public:
+        CaptureScope(Guest& guest, const TileCoordsXYZ& loc)
+            : _guest(guest)
+            , _nextLoc(guest.nextLoc)
+            , _wasCapturing(_captureMoveDirection)
+            , _direction(_capturedMoveDirection)
+            , _deadEnd(_capturedDeadEnd)
+        {
+            _guest.nextLoc = loc.toCoordsXYZ();
+            _captureMoveDirection = true;
+            _capturedMoveDirection = kInvalidDirection;
+            _capturedDeadEnd = false;
+        }
+
+        ~CaptureScope()
+        {
+            _guest.nextLoc = _nextLoc;
+            _captureMoveDirection = _wasCapturing;
+            _capturedMoveDirection = _direction;
+            _capturedDeadEnd = _deadEnd;
+        }
+
+        CaptureScope(const CaptureScope&) = delete;
+        CaptureScope& operator=(const CaptureScope&) = delete;
+
+    private:
+        Guest& _guest;
+        CoordsXYZ _nextLoc;
+        bool _wasCapturing;
+        Direction _direction;
+        bool _deadEnd;
+    };
+
     // Returns the direction CalculateNextDestinationDefault chooses with the guest at loc, without moving them.
     static std::optional<CapturedDecision> CaptureDecisionAt(Guest& peep, const TileCoordsXYZ& loc)
     {
-        const auto savedNextLoc = peep.nextLoc;
-        peep.nextLoc = loc.toCoordsXYZ();
-        _captureMoveDirection = true;
-        _capturedMoveDirection = kInvalidDirection;
-        _capturedDeadEnd = false;
-
+        CaptureScope capture(peep, loc);
         const auto result = CalculateNextDestinationDefault(peep);
-
-        _captureMoveDirection = false;
-        peep.nextLoc = savedNextLoc;
-
         if (result != 0 || _capturedMoveDirection == kInvalidDirection)
             return std::nullopt;
         return CapturedDecision{ _capturedMoveDirection, _capturedDeadEnd };
@@ -2651,15 +2682,29 @@ namespace OpenRCT2::PathFinding
 
     /**
      * The lane (offset from the main lane, towards right) the guest wants to walk in, out of the lanes from laneLeft to
-     * laneRight. Uses the guest's GuestSpreadSignedLane, drawn across the path's width the same way the field's corridor
-     * scoring does, so the tile lane and the position within it are the same preference at two scales.
+     * laneRight. Uses the same rule as CorridorCandidateScores in GuestFieldRouting.cpp: the guest's GuestSpreadSignedLane
+     * picks the point width * (16 + lane) across the path (in 32nds of a tile, from the side GuestSpreadSignedLane calls
+     * negative), and the column whose centre (32 * column + 16) is closest to it wins. So the tile lane and the position
+     * within it are the same preference at two scales. On an exact tie (the point on a column boundary), the field's
+     * scoring falls back to its per-guest hash order over step directions, which has no counterpart here; the column on
+     * the negative side wins instead.
      */
     static int32_t GetPreferredLane(const Guest& peep, Direction forward, Direction right, int32_t laneLeft, int32_t laneRight)
     {
         const int32_t width = laneRight - laneLeft + 1;
         const int32_t lane = GuestSpreadSignedLane(peep.peepId, forward);
-        // Column counted from the side GuestSpreadSignedLane calls negative.
-        const int32_t column = std::clamp(width * (16 + lane) / 32, 0, width - 1);
+        const int32_t target = width * (16 + lane);
+        int32_t column = 0;
+        int32_t bestDistance = std::numeric_limits<int32_t>::max();
+        for (int32_t i = 0; i < width; i++)
+        {
+            const int32_t distance = std::abs(32 * i + 16 - target);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                column = i;
+            }
+        }
         const Direction plusSide = (forward == 0 || forward == 2) ? 1 : 2;
         return right == plusSide ? laneLeft + column : laneRight - column;
     }
