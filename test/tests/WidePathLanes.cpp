@@ -632,3 +632,52 @@ TEST_F(WidePathPlazaTest, DrawCountsMatchStockOnThePlaza)
     EXPECT_GT(heading.decisionsCompared + aimless.decisionsCompared, 500);
     EXPECT_EQ(heading.drawMismatches + aimless.drawMismatches, 0);
 }
+
+// --- A wide area whose way on is a single-width path -------------------------------------------------------------
+
+// A two-lane path (x = 2..7, y = 6..7) whose only way on is a single-width connector at (3, 8), down to the strip.
+class WidePathNarrowExitTest : public WidePathLanesTestBase
+{
+public:
+    static void SetUpTestSuite()
+    {
+        LoadPark({ { kStripFirstX, kStripLastX, 9, 10 }, { 2, 7, 6, 7 }, { 3, 3, 8, 8 } });
+    }
+
+    static void TearDownTestSuite()
+    {
+        UnloadPark();
+    }
+};
+
+TEST_F(WidePathNarrowExitTest, GuestsLeaveThroughTheNarrowPath)
+{
+    const std::pair<TileCoordsXYZ, Direction> starts[] = {
+        { { 7, 6, kPathZ }, 0 },
+        { { 7, 7, kPathZ }, 0 },
+        { { 2, 6, kPathZ }, 2 },
+        { { 2, 7, kPathZ }, 2 },
+    };
+    for (const auto& [start, direction] : starts)
+    {
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto stock = WalkGuests(start, direction, 10, false, true);
+        ScenarioRandSeed(0x12345678, 0x87654321);
+        const auto result = WalkGuests(start, direction, 10, true, true);
+        const auto name = "Narrow exit from " + std::to_string(start.x) + "," + std::to_string(start.y);
+        Print((name + " (disabled)").c_str(), stock);
+        Print(name.c_str(), result);
+        EXPECT_EQ(result.arrived, 10);
+        EXPECT_EQ(result.countedAsLost, 0);
+        // The shortest walk from any start is under 12 tiles.
+        EXPECT_LE(result.tilesWalked, 10 * 16) << "Expected guests to walk straight there, not back and forth";
+    }
+}
+
+TEST_F(WidePathNarrowExitTest, DrawCountsMatchStockAtTheNarrowPath)
+{
+    const auto result = WalkGuests({ 7, 6, kPathZ }, 0, 20, true, true, true);
+    Print("Draws, narrow exit", result);
+    EXPECT_GT(result.decisionsCompared, 100);
+    EXPECT_EQ(result.drawMismatches, 0);
+}

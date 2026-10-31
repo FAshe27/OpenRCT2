@@ -2964,14 +2964,23 @@ namespace OpenRCT2::PathFinding
      * lane, then the one that gets closest, then a straight move over a diagonal one. Returns false (and the lane code below
      * decides) if the field isn't available, the guest is on the destination's doorstep, or no flat move gets closer.
      */
-    static bool TryFieldLaneStep(Guest& peep, const TileCoordsXYZ& loc, const PathElement& current, int32_t& result)
+    enum class FieldLaneStep
+    {
+        moved,    // The guest has been moved.
+        noField,  // No destination, or no field for it here: the lane code decides.
+        handOver, // On the destination's doorstep, or the field has no step: the default code decides.
+    };
+
+    static FieldLaneStep TryFieldLaneStep(Guest& peep, const TileCoordsXYZ& loc, const PathElement& current, int32_t& result)
     {
         const auto goal = GetGuestGoal(peep);
         if (!goal.has_value())
-            return false;
+            return FieldLaneStep::noField;
         uint32_t distanceHere = 0;
-        if (!GuestFieldDistance(*goal, loc, distanceHere) || distanceHere == 0)
-            return false;
+        if (!GuestFieldDistance(*goal, loc, distanceHere))
+            return FieldLaneStep::noField;
+        if (distanceHere == 0)
+            return FieldLaneStep::handOver;
 
         const auto tile = TileCoordsXY{ loc };
         bool found = false;
@@ -3035,9 +3044,19 @@ namespace OpenRCT2::PathFinding
         }
 
         if (!found)
-            return false;
+        {
+            // No flat move gets closer (e.g. the way on is a slope, a queue or a narrower path): take the field's own
+            // step, which handles every kind of path. Never fall back to the lane code here: it can step the guest
+            // away from the destination, and the field would then step them back, over and over.
+            Direction fieldDirection = kInvalidDirection;
+            if (!GuestFieldTryStep(
+                    peep, loc, *goal, static_cast<uint8_t>(PathGetPermittedEdges(false, &current)), fieldDirection))
+                return FieldLaneStep::handOver;
+            result = PeepMoveOneTile(fieldDirection, peep);
+            return FieldLaneStep::moved;
+        }
         result = bestSide.has_value() ? PeepMoveDiagonally(bestForward, *bestSide, peep) : PeepMoveOneTile(bestForward, peep);
-        return true;
+        return FieldLaneStep::moved;
     }
 
     static int32_t CalculateNextDestinationInLanes(Guest& peep, const TileCoordsXYZ& loc, PathElement& current)
@@ -3056,8 +3075,15 @@ namespace OpenRCT2::PathFinding
 
         // Guests heading somewhere with a distance field follow the field directly across the whole path.
         int32_t fieldResult = 0;
-        if (TryFieldLaneStep(peep, loc, current, fieldResult))
-            return fieldResult;
+        switch (TryFieldLaneStep(peep, loc, current, fieldResult))
+        {
+            case FieldLaneStep::moved:
+                return fieldResult;
+            case FieldLaneStep::handOver:
+                return followOwnDecision();
+            case FieldLaneStep::noField:
+                break;
+        }
 
         const auto mainLane = FindMainLane(peep, loc, current, *own);
         if (!mainLane.has_value())
