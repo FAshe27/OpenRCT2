@@ -23,8 +23,17 @@ namespace OpenRCT2::RideStaffing
     // Requirements are a pure function of the ride type descriptor, derived at
     // runtime and never stored: roller coasters need 4 operators, every other
     // ride (flat rides, transport, water, go karts, mazes, ...) needs 2, stalls
-    // need 1, and facilities (toilets, first aid, cash machines, info kiosks)
-    // need none. Multi-station coasters are a flat 4 per ride in v1.
+    // have a staffing target of 2, and facilities (toilets, first aid, cash
+    // machines, info kiosks) need none. Multi-station coasters are a flat 4
+    // per ride in v1.
+    //
+    // The requirement is the staffing TARGET: how many operators the ride
+    // wants at post (the Operators line's denominator, and the cap the
+    // assign-nearest button fills to). The MINIMUM (GetMinimumOperators) is
+    // how many must be at post for the ride to open and operate: the same
+    // number everywhere except stalls, which open and sell with a single
+    // operator - the second slot exists so a restock run never leaves the
+    // stall unmanned (Franklin's ruling, 2026-10-31).
     //
     // Only operators standing at their post (PeepState::operating) count.
     // All staffing consequences are inert until the feature engages: see IsEngaged().
@@ -32,6 +41,7 @@ namespace OpenRCT2::RideStaffing
     struct Staffing
     {
         int32_t required = 0;
+        int32_t minimum = 0;
         int32_t atPost = 0;
         int32_t assigned = 0;
 
@@ -51,6 +61,7 @@ namespace OpenRCT2::RideStaffing
     };
 
     int32_t GetRequiredOperators(const Ride& ride);
+    int32_t GetMinimumOperators(const Ride& ride);
     Staffing GetStaffing(const Ride& ride);
     int32_t CountOperatorsAtPost(const Ride& ride);
     int32_t CountAssignedOperators(const Ride& ride);
@@ -167,6 +178,23 @@ namespace OpenRCT2::RideStaffing
     // like CountWorkersOnBreak, so the answer can never drift from
     // reality across pickups, firings and demolitions.
     bool IsRestockInFlight(const Ride& ride);
+
+    // True when a restock run could be dispatched for this stall right now:
+    // staffing is engaged, the stall is open with at least one operator at
+    // post, its stock is below capacity, no run is already out for it, and
+    // an open stockroom exists to fetch from. The stall window's Restock
+    // now button enables on exactly this; the manual dispatch re-checks it.
+    bool CanRestockNow(const Ride& ride);
+
+    // Manual restock dispatch (the Restock now button): send a worker for
+    // stock immediately instead of waiting for the trigger level. The
+    // runner is the stall's second at-post worker, as on an automatic run;
+    // with only the operator at post the operator goes himself and the
+    // stall stands closed for the trip (Franklin's ruling, 2026-10-31 -
+    // the same shape as the automatic run's empty-stall fallback, but at
+    // any stock level). Returns false when no run was dispatched (the
+    // CanRestockNow conditions, or no open stockroom at dispatch time).
+    bool RequestRestock(Ride& ride);
 
     // Stockrooms (Restock): a stockroom is a ride of the cloned type
     // RIDE_TYPE_STOCKROOM - an unstaffed supply building whose only

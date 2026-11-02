@@ -30,6 +30,7 @@
 #include <openrct2/actions/ResultWithMessage.h>
 #include <openrct2/actions/park/ParkSetParameterAction.h>
 #include <openrct2/actions/peep/StaffSetAssignmentAction.h>
+#include <openrct2/actions/ride/RideRestockNowAction.h>
 #include <openrct2/actions/ride/RideSetAppearanceAction.h>
 #include <openrct2/actions/ride/RideSetColourSchemeAction.h>
 #include <openrct2/actions/ride/RideSetNameAction.h>
@@ -140,6 +141,7 @@ namespace OpenRCT2::Ui::Windows
         WIDX_TEST_LIGHT,
         WIDX_OPEN_LIGHT,
         WIDX_MAIN_ASSIGN_OPERATOR,
+        WIDX_MAIN_RESTOCK_NOW,
 
         WIDX_VEHICLE_TYPE = 14,
         WIDX_VEHICLE_TYPE_DROPDOWN,
@@ -291,7 +293,8 @@ namespace OpenRCT2::Ui::Windows
         makeWidget({296,  62}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_TEST_BUTTON_0),  STR_SIMULATE_RIDE_TIP      ),
         makeWidget({296,  62}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_TEST_BUTTON_0),  STR_TEST_RIDE_TIP          ),
         makeWidget({296,  76}, { 14,  14}, WidgetType::imgBtn,        WindowColour::secondary, ImageId(SPR_G2_RCT1_OPEN_BUTTON_0),  STR_OPEN_RIDE_TIP          ),
-        makeWidget({291, 142}, { 24,  24}, WidgetType::flatBtn,       WindowColour::secondary, 0xFFFFFFFF,                    STR_ASSIGN_OPERATOR_TIP    )
+        makeWidget({291, 142}, { 24,  24}, WidgetType::flatBtn,       WindowColour::secondary, 0xFFFFFFFF,                    STR_ASSIGN_OPERATOR_TIP    ),
+        makeWidget({196, 142}, {100,  14}, WidgetType::button,        WindowColour::secondary, STR_RIDE_RESTOCK_NOW      )
     );
 
     // 0x009ADDA8
@@ -1677,6 +1680,9 @@ namespace OpenRCT2::Ui::Windows
                 case WIDX_MAIN_ASSIGN_OPERATOR:
                     AssignNearestWorker();
                     break;
+                case WIDX_MAIN_RESTOCK_NOW:
+                    RestockNow();
+                    break;
                 case WIDX_CONSTRUCTION:
                 {
                     auto ride = GetRide(rideId);
@@ -1765,7 +1771,7 @@ namespace OpenRCT2::Ui::Windows
         // The stock row for selling stalls (Restock), stacked under the
         // Operators row on the main page: exactly the rides whose stock
         // counter exists. Every shopOrStall ride also shows the Operators
-        // row (required 1, and the shop types carry isShopOrFacility), so
+        // row (required > 0, and the shop types carry isShopOrFacility), so
         // the stock row's resize, geometry shift and drawing all live
         // inside that row's block and can never disagree with it.
         bool MainShowsStockRow(const Ride& ride) const
@@ -2501,6 +2507,11 @@ namespace OpenRCT2::Ui::Windows
             widgets[WIDX_MAIN_ASSIGN_OPERATOR].top = height - 27;
             widgets[WIDX_MAIN_ASSIGN_OPERATOR].bottom = height - 3;
             widgets[WIDX_MAIN_ASSIGN_OPERATOR].setHidden(!showOperatorsRow);
+            widgets[WIDX_MAIN_RESTOCK_NOW].left = width - 100;
+            widgets[WIDX_MAIN_RESTOCK_NOW].right = width - 5;
+            widgets[WIDX_MAIN_RESTOCK_NOW].top = height - 44;
+            widgets[WIDX_MAIN_RESTOCK_NOW].bottom = height - 30;
+            widgets[WIDX_MAIN_RESTOCK_NOW].setHidden(!(showOperatorsRow && MainShowsStockRow(*ride)));
             if (showOperatorsRow)
             {
                 // A stock row (stalls) stacks a second band at the same
@@ -2525,6 +2536,11 @@ namespace OpenRCT2::Ui::Windows
                     }
                 }
                 setWidgetDisabled(WIDX_MAIN_ASSIGN_OPERATOR, !hasUnassignedWorker);
+
+                if (MainShowsStockRow(*ride))
+                {
+                    setWidgetDisabled(WIDX_MAIN_RESTOCK_NOW, !RideStaffing::CanRestockNow(*ride));
+                }
             }
 
             WindowAlignTabs(this, WIDX_TAB_1, WIDX_TAB_10);
@@ -2766,7 +2782,7 @@ namespace OpenRCT2::Ui::Windows
                 auto operatorsFt = Formatter();
                 operatorsFt.Add<int32_t>(staffing.atPost);
                 operatorsFt.Add<int32_t>(staffing.required);
-                operatorsFt.Add<int32_t>(staffing.required);
+                operatorsFt.Add<int32_t>(staffing.minimum);
                 StringId operatorsString = STR_RIDE_OPERATORS;
                 if (staffing.assigned > staffing.atPost)
                 {
@@ -3990,6 +4006,12 @@ namespace OpenRCT2::Ui::Windows
             }
         }
 
+        void RestockNow()
+        {
+            auto action = GameActions::RideRestockNowAction(rideId);
+            GameActions::Execute(&action, getGameState());
+        }
+
         void AssignNearestWorker()
         {
             auto ride = GetRide(rideId);
@@ -4361,7 +4383,7 @@ namespace OpenRCT2::Ui::Windows
                     auto operatorsFt = Formatter();
                     operatorsFt.Add<int32_t>(staffing.atPost);
                     operatorsFt.Add<int32_t>(staffing.required);
-                    operatorsFt.Add<int32_t>(staffing.required);
+                    operatorsFt.Add<int32_t>(staffing.minimum);
                     StringId operatorsString = STR_RIDE_OPERATORS;
                     if (staffing.assigned > staffing.atPost)
                     {

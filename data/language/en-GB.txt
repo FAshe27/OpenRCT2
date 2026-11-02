@@ -3903,3 +3903,4 @@ STR_7109    :Stock: {INT32} / {INT32}
 STR_7110    :Closed (sold out)
 STR_7111    :Restocking
 STR_7112    :Stock: {INT32} / {INT32} (restocking)
+STR_7113    :Restock now

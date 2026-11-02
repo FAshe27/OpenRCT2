@@ -32,7 +32,10 @@ namespace OpenRCT2::RideStaffing
                 // Toilets, first aid, cash machines and information kiosks run unattended.
                 return 0;
             case RideClassification::shopOrStall:
-                return 1;
+                // Two: the operator plus the restock runner, so a run
+                // never leaves the stall unmanned. The stall still opens
+                // and sells with one (GetMinimumOperators).
+                return 2;
             case RideClassification::ride:
                 break;
         }
@@ -42,6 +45,14 @@ namespace OpenRCT2::RideStaffing
         if (rtd.Category == RideCategory::rollerCoaster)
             return 4;
         return 2;
+    }
+
+    int32_t GetMinimumOperators(const Ride& ride)
+    {
+        const auto& rtd = ride.getRideTypeDescriptor();
+        if (rtd.Classification == RideClassification::shopOrStall)
+            return 1;
+        return GetRequiredOperators(ride);
     }
 
     bool AreOperatorsVisibleAtPost(const Ride& ride)
@@ -76,6 +87,7 @@ namespace OpenRCT2::RideStaffing
     {
         Staffing result;
         result.required = GetRequiredOperators(ride);
+        result.minimum = GetMinimumOperators(ride);
         if (result.required <= 0)
             return result;
         result.atPost = CountOperatorsAtPost(ride);
@@ -303,6 +315,62 @@ namespace OpenRCT2::RideStaffing
                 return true;
         }
         return false;
+    }
+
+    bool CanRestockNow(const Ride& ride)
+    {
+        if (ride.getRideTypeDescriptor().Classification != RideClassification::shopOrStall)
+            return false;
+        if (ride.status != RideStatus::open)
+            return false;
+        if (GetRequiredOperators(ride) <= 0)
+            return false;
+        if (!IsEngaged())
+            return false;
+        if (ride.shopStock >= Ride::kShopStockCapacity)
+            return false;
+        if (CountOperatorsAtPost(ride) <= 0)
+            return false;
+        if (IsRestockInFlight(ride))
+            return false;
+        for (auto& other : RideManager(getGameState()))
+        {
+            if (IsStockroom(other) && other.status != RideStatus::closed)
+                return true;
+        }
+        return false;
+    }
+
+    bool RequestRestock(Ride& ride)
+    {
+        if (!CanRestockNow(ride))
+            return false;
+
+        // The automatic trigger's crew scan, in the same shape: the two
+        // smallest entity ids among the stall's at-post workers - first
+        // is the operator (stays), second is the runner (goes). With no
+        // second worker the operator goes himself.
+        Staff* first = nullptr;
+        Staff* second = nullptr;
+        for (auto* staff : EntityList<Staff>())
+        {
+            if (!staff->isWorker() || staff->currentRide != ride.id || staff->state != PeepState::operating)
+                continue;
+            if (first == nullptr || staff->id.ToUnderlying() < first->id.ToUnderlying())
+            {
+                second = first;
+                first = staff;
+            }
+            else if (second == nullptr || staff->id.ToUnderlying() < second->id.ToUnderlying())
+            {
+                second = staff;
+            }
+        }
+
+        auto* runner = second != nullptr ? second : first;
+        if (runner == nullptr)
+            return false;
+        return runner->workerBeginRestockRun();
     }
 
     bool IsStockroom(const Ride& ride)

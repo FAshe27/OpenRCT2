@@ -210,8 +210,8 @@ namespace OpenRCT2::GameActions
                 // simulating, and open-to-testing switches, are not gated.
                 if (ride->status == RideStatus::closed && RideStaffing::IsEngaged())
                 {
-                    const int32_t required = RideStaffing::GetRequiredOperators(*ride);
-                    if (required > 0 && RideStaffing::CountOperatorsAtPost(*ride) < required)
+                    const int32_t minimum = RideStaffing::GetMinimumOperators(*ride);
+                    if (minimum > 0 && RideStaffing::CountOperatorsAtPost(*ride) < minimum)
                     {
                         ride->pendingOpenStatus = _status;
                         // The trains materialise now, while the request

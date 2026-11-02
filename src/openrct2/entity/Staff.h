@@ -162,6 +162,10 @@ namespace OpenRCT2
         // its frontage path tile, resuming patrolling. The exit funnel for
         // every break-room exit trigger (assignment, summon, room closed).
         void workerLeaveBreakRoom();
+        // Workers: begin a restock run to the nearest open stockroom
+        // (the automatic trigger in Staff.cpp, or a manual dispatch via
+        // RideStaffing::RequestRestock). False when no stockroom is open.
+        bool workerBeginRestockRun();
 
         void clearPatrolArea();
         void setPatrolArea(const CoordsXY& coords, bool value);
@@ -214,7 +218,6 @@ namespace OpenRCT2
 
         // Workers (restock runs)
         void tick128WorkerRestockCheck();
-        bool workerBeginRestockRun();
         void forgetRestockRun();
         void updateRestocking();
         void workerLeaveStockroom();

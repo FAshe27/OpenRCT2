@@ -545,7 +545,7 @@ namespace OpenRCT2
                 // crew to reach their posts.
                 ft.Add<StringId>(STR_OPENING_WAITING_FOR_STAFF);
                 ft.Add<uint16_t>(static_cast<uint16_t>(RideStaffing::CountOperatorsAtPost(*this)));
-                ft.Add<uint16_t>(static_cast<uint16_t>(RideStaffing::GetRequiredOperators(*this)));
+                ft.Add<uint16_t>(static_cast<uint16_t>(RideStaffing::GetMinimumOperators(*this)));
             }
             else if (!getRideTypeDescriptor().flags.has(RtdFlag::isShopOrFacility))
             {
@@ -1233,7 +1233,7 @@ namespace OpenRCT2
             return;
         }
 
-        if (RideStaffing::CountOperatorsAtPost(*this) < RideStaffing::GetRequiredOperators(*this))
+        if (RideStaffing::CountOperatorsAtPost(*this) < RideStaffing::GetMinimumOperators(*this))
             return;
 
         // The minimum crew is at post: apply the requested status exactly as

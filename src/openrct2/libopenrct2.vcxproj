@@ -133,6 +133,7 @@
     <ClInclude Include="actions\ride\RideDemolishAction.h" />
     <ClInclude Include="actions\ride\RideEntranceExitPlaceAction.h" />
     <ClInclude Include="actions\ride\RideEntranceExitRemoveAction.h" />
+    <ClInclude Include="actions\ride\RideRestockNowAction.h" />
     <ClInclude Include="actions\ride\RideFreezeRatingAction.h" />
     <ClInclude Include="actions\ride\RideSetAppearanceAction.h" />
     <ClInclude Include="actions\ride\RideSetColourSchemeAction.h" />
@@ -809,6 +810,7 @@
     <ClCompile Include="actions\ride\RideDemolishAction.cpp" />
     <ClCompile Include="actions\ride\RideEntranceExitPlaceAction.cpp" />
     <ClCompile Include="actions\ride\RideEntranceExitRemoveAction.cpp" />
+    <ClCompile Include="actions\ride\RideRestockNowAction.cpp" />
     <ClCompile Include="actions\ride\RideFreezeRatingAction.cpp" />
     <ClCompile Include="actions\ride\RideSetAppearanceAction.cpp" />
     <ClCompile Include="actions\ride\RideSetColourSchemeAction.cpp" />
