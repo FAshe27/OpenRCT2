@@ -336,14 +336,14 @@ namespace OpenRCT2
 
     void Vehicle::goKartAttemptLaneSwitch()
     {
-        uint16_t probability = 0x8000;
+        // A kart that has just bumped the kart ahead is being held up, so it always tries the
+        // other lane. A kart running freely only drifts across occasionally, as before. Either
+        // way exactly one ScenarioRand draw is consumed, as in vanilla.
+        uint16_t probability = 0x0A3D;
         if (flags.has(VehicleFlag::currentlyColliding))
         {
             flags.unset(VehicleFlag::currentlyColliding);
-        }
-        else
-        {
-            probability = 0x0A3D;
+            probability = 0xFFFF;
         }
         if ((ScenarioRand() & 0xFFFF) <= probability)
         {

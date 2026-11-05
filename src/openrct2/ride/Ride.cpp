@@ -3543,6 +3543,21 @@ namespace OpenRCT2
         vehicle->num_seats = carEntry.numSeats;
         vehicle->speed = carEntry.poweredMaxSpeed;
         vehicle->powered_acceleration = carEntry.poweredAcceleration;
+        if (carEntry.flags.has(CarEntryFlag::isGoKart))
+        {
+            // Give every kart its own pace, with the same spread race mode rolls at the start
+            // of a race (RideRaceInitVehicleSpeeds: poweredMaxSpeed - 8..+7). Derived from a
+            // hash of the kart's slot on the ride instead of a random draw, so a kart keeps
+            // its pace whenever the ride's vehicles are recreated and no ScenarioRand draws
+            // are added. Race mode still re-rolls speeds at the start of each race, as before.
+            uint32_t paceHash = (static_cast<uint32_t>(ride.id.ToUnderlying()) * 256u + static_cast<uint32_t>(vehicleIndex)
+                                 + 1u)
+                * 2654435761u;
+            paceHash ^= paceHash >> 16;
+            const int32_t paceOffset = static_cast<int32_t>((paceHash >> 20) % 16u) - 8;
+            vehicle->speed = static_cast<uint8_t>(
+                std::clamp<int32_t>(static_cast<int32_t>(carEntry.poweredMaxSpeed) + paceOffset, 1, 255));
+        }
         vehicle->velocity = 0;
         vehicle->acceleration = 0;
         vehicle->SwingSprite = 0;
